@@ -28,6 +28,25 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 add_compile_definitions(STRATA_VERSION="${PROJECT_VERSION}")
 
+# --- model geometry profile (see include/strata/core/geometry_build.hpp) ------------------------------------------
+# Upstream compiles the kernels for one shape (Qwen3.8-Flash-Next).  STRATA_GEOM_PROFILE selects which
+# qwen4exp model's shape this build is compiled for, so one tree serves more than one model revision.
+#   flashnext  (default) n_embd 2560, 48 layers, 640-wide experts, 512 experts, 48 ssm value heads
+#   w45                  n_embd 2048, 40 layers, 512-wide experts, 256 experts, 32 ssm value heads
+# Individual axes can be overridden with -DSTRATA_N_EMBD / -DSTRATA_N_FF / ... for a model the profiles
+# do not name.  A file whose metadata disagrees with the compiled shape is still refused at load by
+# geometry_unsupported: this widens what the build can target, it does not weaken the check.
+set(STRATA_GEOM_PROFILE "flashnext" CACHE STRING "the qwen4exp shape the kernels are compiled for: flashnext or w45")
+set_property(CACHE STRATA_GEOM_PROFILE PROPERTY STRINGS flashnext w45)
+if(STRATA_GEOM_PROFILE STREQUAL "w45")
+  add_compile_definitions(STRATA_GEOM_PROFILE_W45=1)
+  message(STATUS "geometry profile: w45 (n_embd 2048, n_ff 512, 40 layers, 256 experts)")
+elseif(STRATA_GEOM_PROFILE STREQUAL "flashnext")
+  message(STATUS "geometry profile: flashnext (upstream defaults)")
+else()
+  message(FATAL_ERROR "STRATA_GEOM_PROFILE must be flashnext or w45 (got '${STRATA_GEOM_PROFILE}')")
+endif()
+
 set(STRATA_SYCL_AOT "" CACHE STRING "AOT device for the GPU code, e.g. bmg-g31 (empty: SPIR-V, JIT at run time)")
 # The device spins on host flags are bounded (include/strata/sycl_doorbell.hpp). The bound is chosen per device at run
 # time (20,000 reads on a B-series card, 2,000,000 elsewhere; STRATA_SPIN_MAX overrides). STRATA_SYCL_SPIN_MAX fixes one

@@ -12,6 +12,7 @@
 #pragma once
 
 #include "strata/artifact/model_family.hpp"
+#include "strata/core/geometry_build.hpp"
 
 #include <cstdint>
 
@@ -21,41 +22,41 @@ namespace strata::core {
 /// contract and not a tuning knob.  The defaults are Qwen3.8-Flash-Next's (qwen4exp), the shape the kernels
 /// are compiled for; the GGUF key each field is read from is named beside it.
 struct ModelGeometry {
-    int64_t n_embd = 2560;          ///< embedding_length
-    int64_t n_layers = 48;          ///< block_count (the trunk; an in-file MTP block is counted in n_mtp_layers)
-    int64_t qsa_interval = 4;       ///< full_attention_interval: every 4th layer is full attention, 3, 7, ... 47
+    int64_t n_embd = STRATA_N_EMBD;          ///< embedding_length
+    int64_t n_layers = STRATA_N_LAYERS;          ///< block_count (the trunk; an in-file MTP block is counted in n_mtp_layers)
+    int64_t qsa_interval = STRATA_QSA_INTERVAL;       ///< full_attention_interval: every 4th layer is full attention, 3, 7, ... 47
     int64_t n_vocab = 248320;       ///< the length of tokenizer.ggml.tokens
     double rms_eps = 1e-6;          ///< attention.layer_norm_rms_epsilon
 
     // GDN (36 layers)
-    int64_t ssm_state_size = 128;        ///< ssm.state_size: the key head width, and the value head width
-    int64_t ssm_k_heads = 16;            ///< ssm.group_count
-    int64_t ssm_v_heads = 48;            ///< ssm.time_step_rank
-    int64_t ssm_d_conv = 4;              ///< ssm.conv_kernel
-    int64_t ssm_conv_channels = 10240;   ///< 2*128*16 + 128*48, derived
-    int64_t ssm_value_dim = 6144;        ///< ssm.inner_size, 128 * 48
+    int64_t ssm_state_size = STRATA_SSM_STATE_SIZE;        ///< ssm.state_size: the key head width, and the value head width
+    int64_t ssm_k_heads = STRATA_SSM_K_HEADS;            ///< ssm.group_count
+    int64_t ssm_v_heads = STRATA_SSM_V_HEADS;            ///< ssm.time_step_rank
+    int64_t ssm_d_conv = STRATA_SSM_D_CONV;              ///< ssm.conv_kernel
+    int64_t ssm_conv_channels = STRATA_SSM_CONV_CHANNELS;   ///< 2*128*16 + 128*48, derived
+    int64_t ssm_value_dim = STRATA_SSM_VALUE_DIM;        ///< ssm.inner_size, 128 * 48
 
     // QSA (12 layers)
-    int64_t n_head = 24;            ///< attention.head_count
-    int64_t n_head_kv = 2;          ///< attention.head_count_kv
-    int64_t head_dim = 256;         ///< attention.key_length (= attention.value_length)
-    int64_t n_rot = 64;             ///< rope.dimension_count: the rotated slice of head_dim and of idx_key_dim
-    int64_t idx_q_heads = 4;        ///< attention.indexer.head_count
-    int64_t idx_key_dim = 128;      ///< attention.indexer.key_length
-    int64_t idx_block = 4;          ///< the non-zero attention.compress_ratios entry: one pooled key per 4 cells
-    int64_t idx_top_k = 2048;       ///< attention.indexer.top_k: cells of selection budget
+    int64_t n_head = STRATA_N_HEAD;            ///< attention.head_count
+    int64_t n_head_kv = STRATA_N_HEAD_KV;          ///< attention.head_count_kv
+    int64_t head_dim = STRATA_HEAD_DIM;         ///< attention.key_length (= attention.value_length)
+    int64_t n_rot = STRATA_N_ROT;             ///< rope.dimension_count: the rotated slice of head_dim and of idx_key_dim
+    int64_t idx_q_heads = STRATA_IDX_Q_HEADS;        ///< attention.indexer.head_count
+    int64_t idx_key_dim = STRATA_IDX_KEY_DIM;      ///< attention.indexer.key_length
+    int64_t idx_block = STRATA_IDX_BLOCK;          ///< the non-zero attention.compress_ratios entry: one pooled key per 4 cells
+    int64_t idx_top_k = STRATA_IDX_TOP_K;       ///< attention.indexer.top_k: cells of selection budget
 
     // gated residual, on every layer
-    int64_t hc = 4;                 ///< hyper_connection.count
-    int64_t hc_lr = 320;            ///< hyper_connection.low_rank
+    int64_t hc = STRATA_HC;                 ///< hyper_connection.count
+    int64_t hc_lr = STRATA_HC_LR;            ///< hyper_connection.low_rank
 
     // MoE, on every layer
-    int64_t n_expert = 512;         ///< expert_count; pruned variants (GSQ-RCO Coder) ship fewer
-    int64_t n_expert_used = 10;     ///< expert_used_count
-    int64_t n_ff = 640;             ///< expert_feed_forward_length (= expert_shared_feed_forward_length)
+    int64_t n_expert = STRATA_N_EXPERT;         ///< expert_count; pruned variants (GSQ-RCO Coder) ship fewer
+    int64_t n_expert_used = STRATA_N_EXPERT_USED;     ///< expert_used_count
+    int64_t n_ff = STRATA_N_FF;             ///< expert_feed_forward_length (= expert_shared_feed_forward_length)
 
     // appended for the model families (Qwen3.6 = qwen35moe); the defaults keep Flash-Next's values
-    int64_t n_ff_shexp = 640;       ///< the shared expert's FFN width (qwen4exp: equal to n_ff, read_geometry checks)
+    int64_t n_ff_shexp = STRATA_N_FF;       ///< the shared expert's FFN width (qwen4exp: equal to n_ff, read_geometry checks)
     ModelFamily family = ModelFamily::Qwen4Exp;
     int64_t n_mtp_layers = 0;       ///< MTP blocks inside the model file, after the trunk (qwen35moe: blk.40)
 
