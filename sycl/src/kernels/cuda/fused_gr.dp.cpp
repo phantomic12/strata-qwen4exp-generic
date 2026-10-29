@@ -24,9 +24,9 @@
 namespace strata::kernels {
 namespace {
 
-constexpr int N = 2560;         // n_embd
+constexpr int N = STRATA_N_EMBD;   // n_embd (geometry profile)
 constexpr int HC = 4;           // streams
-constexpr int D = N * HC;       // 10240
+constexpr int D = N * HC;       // hc * n_embd (10240 upstream, 8192 on w45)
 constexpr int LR = 320;         // hc_lr
 static_assert(N == strata::core::kCompiledGeometry.n_embd && HC == strata::core::kCompiledGeometry.hc && LR == strata::core::kCompiledGeometry.hc_lr, "fused_gr is compiled for core/geometry.hpp");
 constexpr int THREADS = 256;
@@ -34,7 +34,7 @@ constexpr int WARPS = THREADS / 32;
 #if defined(__HIPCC__)
 constexpr int TILE = 1280;             // eight-token tile fits gfx1100's 64 KiB LDS limit
 #else
-constexpr int TILE = 2560;             // xn floats per token staged at a time: 320 chunks of 8, 10 per lane
+constexpr int TILE = STRATA_N_EMBD;     // xn floats per token staged at a time
 #endif
 constexpr int TQ = TILE / 8 / 32;      // uint4 weight chunks per lane per tile
 // SYCL port: the down kernel's 41 work-groups filled 15% of the B70's threads (metrics 2026-09-30); each row's
@@ -1463,7 +1463,7 @@ int down_chunk(bool staged, int* tile_out) {
         cc_min = dpct::get_device(dev).get_minor_version();
         const bool small_tile = strata::cc_major_of(cc_maj) * 10 + strata::cc_minor_of(cc_min) == 75;
 #endif
-        const int tv = small_tile ? 1280 : 2560;
+        const int tv = small_tile ? (STRATA_N_EMBD / 2) : STRATA_N_EMBD;
         tile[dev] = tv;
         int want = (int) (kFusedGrMaxT * tv * sizeof(float));
         if (optin > 0 && want > optin) want = optin;
@@ -1548,7 +1548,7 @@ void launch_multi(const GrMulti &m, int variant, dpct::queue_ptr st,
     }
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, (void*) st);
     const bool staged = variant >= kHcStaged;
-    int tv = 2560;
+    int tv = STRATA_N_EMBD;
     const int chunk_tok = down_chunk(staged, &tv);
     /*
     DPCT1083: The size of local memory in the migrated code may be different
@@ -1691,14 +1691,14 @@ void launch_multi(const GrMulti &m, int variant, dpct::queue_ptr st,
 
                     cgh.parallel_for<dpct_kernel_name<
                         class gr_down_multi_kernel_2d8885,
-                        dpct_kernel_scalar<2560>, dpct_kernel_scalar<4>>>(
+                        dpct_kernel_scalar<STRATA_N_EMBD>, dpct_kernel_scalar<STRATA_HC>>>(
                         sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS + 1) *
                                               sycl::range(1, 1, THREADS),
                                           sycl::range(1, 1, THREADS)),
                         exp_props,
                         [=](sycl::nd_item<3> item_ct1)
                             [[sycl::reqd_sub_group_size(32)]] {
-                                gr_down_multi_kernel<2560, 4>(
+                                gr_down_multi_kernel<STRATA_N_EMBD, STRATA_HC>(
                                     c, dpct_local_acc_ct1
                                            .get_multi_ptr<
                                                sycl::access::decorated::no>()
@@ -1719,14 +1719,14 @@ void launch_multi(const GrMulti &m, int variant, dpct::queue_ptr st,
                     */
                     cgh.parallel_for<dpct_kernel_name<
                         class gr_down_multi_kernel_df2ead,
-                        dpct_kernel_scalar<2560>, dpct_kernel_scalar<2560>>>(
+                        dpct_kernel_scalar<STRATA_N_EMBD>, dpct_kernel_scalar<STRATA_N_EMBD>>>(
                         sycl::nd_range<3>(sycl::range(1, 1, DOWN_BLOCKS + 1) *
                                               sycl::range(1, 1, THREADS),
                                           sycl::range(1, 1, THREADS)),
                         exp_props,
                         [=](sycl::nd_item<3> item_ct1)
                             [[sycl::reqd_sub_group_size(32)]] {
-                                gr_down_multi_kernel<2560>(
+                                gr_down_multi_kernel<STRATA_N_EMBD>(
                                     c, dpct_local_acc_ct1
                                            .get_multi_ptr<
                                                sycl::access::decorated::no>()

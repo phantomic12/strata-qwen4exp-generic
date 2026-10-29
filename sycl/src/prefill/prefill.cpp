@@ -134,8 +134,9 @@ inline bool dma_direct(const core::ExpertSource* src, int64_t layer, int64_t exp
     return usm;
 }
 constexpr float EPS = 1e-6f;
-constexpr int64_t N = 2560, HC = 4, D = N * HC, LR = 320, K = 10, NE = 512;
-constexpr int64_t C = 10240, ZV = 6144, HV = 48;
+constexpr int64_t N = STRATA_N_EMBD, HC = STRATA_HC, D = N * HC, LR = STRATA_HC_LR,
+                   K = STRATA_N_EXPERT_USED, NE = STRATA_N_EXPERT;
+constexpr int64_t C = STRATA_HC_DIM, ZV = STRATA_SSM_VALUE_DIM, HV = STRATA_SSM_V_HEADS;
 // plan v0.3 P6: staging holds the largest blob of the pack (a native pack's blobs differ per layer)
 inline int64_t MAXBLOB() { return (int64_t) strata::kernels::cpu::expert_layout().max_blob; }
 constexpr int STAGE = 8;           // host->device expert staging ring (chunks below stream_all_min())
@@ -1478,7 +1479,7 @@ bool Prefill::carve(size_t T, void* alloc) {
         }
         if (base == nullptr) ok = false;
     }
-    for (int i = 0; i < dq_slots(); ++i) { m.dq_gu[i] = o.take<uint16_t>(1280 * 2560, ok); m.dq_d[i] = o.take<uint16_t>(2560 * 640, ok); }
+    for (int i = 0; i < dq_slots(); ++i) { m.dq_gu[i] = o.take<uint16_t>(2 * STRATA_N_FF * STRATA_N_EMBD, ok); m.dq_d[i] = o.take<uint16_t>(STRATA_N_EMBD * STRATA_N_FF, ok); }
     if (mmq_plan().any) {
         const MmqPlan& mp = mmq_plan();
         m.ids_identity = o.take<int32_t>(T * K, ok);
@@ -2159,7 +2160,7 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
     const int64_t max_blocks = ss.qsa_states[ss.qsa_primary()].max_cells / s.idx_block + 2;
     o.take<uint8_t>((size_t) std::max({gdn_set_bytes(T), qsa_set_bytes(T, cap, max_blocks, 256, 32, s),
                                        moe_set_bytes(T, g.n_expert, fused_layout(T, src))}), ok);
-    for (int i = 0; i < dq_slots(); ++i) { o.take<uint16_t>(1280 * 2560, ok); o.take<uint16_t>(2560 * 640, ok); }
+    for (int i = 0; i < dq_slots(); ++i) { o.take<uint16_t>(2 * STRATA_N_FF * STRATA_N_EMBD, ok); o.take<uint16_t>(STRATA_N_EMBD * STRATA_N_FF, ok); }
     if (mmq_plan().any) {
         const MmqPlan& mp = mmq_plan();
         o.take<int32_t>(T * K, ok);
@@ -3252,7 +3253,7 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                     if (staged) pf_step("reading the prompt (batched, step sync): the K/V append at layer", l);
                     split_q(m.Qf, m.q, T, m.cs);
                     rms_rows(m.q, (const float*) wqn->data, T * 24, 256, 256, EPS, m.cs);
-                    rope(m.q, T, 24, 256, 6144, p0, strata::kernels::rope_scaling(), m.cs);
+                    rope(m.q, T, STRATA_N_HEAD, STRATA_HEAD_DIM, STRATA_SSM_VALUE_DIM, p0, strata::kernels::rope_scaling(), m.cs);
                     if (st.kv_rot) strata::kernels::fwht256_inplace_cuda(m.q, T * 24, m.cs);
                     rms_rows(m.q_idx, (const float*) wiqn->data, T * 4, 128, 128, EPS, m.cs);
                     rope(m.q_idx, T, 4, 128, 512, p0, strata::kernels::rope_scaling(), m.cs);
@@ -4231,7 +4232,7 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                         const bool i8on = !xmx2_only && i8m != 0 && !use_mmq && lay.native && !had_gu && !had_d &&
                                           (lay.fmt[(size_t) l].gu_type == 21 || lay.fmt[(size_t) l].gu_type == 18 || lay.fmt[(size_t) l].gu_type == 22) &&
                                           (lay.fmt[(size_t) l].d_type == 20 || lay.fmt[(size_t) l].d_type == 42) &&
-                                          lay.fmt[(size_t) l].n_ff == 640 && lay.fmt[(size_t) l].n_embd == 2560 &&
+                                          lay.fmt[(size_t) l].n_ff == STRATA_N_FF && lay.fmt[(size_t) l].n_embd == STRATA_N_EMBD &&
                                           strata::prefill::i8::available(m.cs);
                         const bool xmx2 = xmx2_only || i8on;
                         if (i8_env() != nullptr && i8m != 0 && lay.native) {

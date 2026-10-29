@@ -22,8 +22,8 @@
 namespace strata::prefill {
 namespace {
 
-constexpr int N = 2560, HC = 4, D = N * HC, LR = 320;
-constexpr int S = 128, HK = 16, HV = 48, C = 10240;
+constexpr int N = STRATA_N_EMBD, HC = STRATA_HC, D = N * HC, LR = STRATA_HC_LR;
+constexpr int S = STRATA_SSM_STATE_SIZE, HK = STRATA_SSM_K_HEADS, HV = STRATA_SSM_V_HEADS, C = STRATA_HC_DIM;
 
 __dpct_inline__ float warp_sum(float v) {
 #pragma unroll
@@ -1744,7 +1744,7 @@ __dpct_inline__ void blob_dequant_kernel(const uint8_t *__restrict__ blob,
                                          uint16_t *__restrict__ d16) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     constexpr size_t O_D_CODES = (size_t)1280 * 640,
-                     O_GU_SC = O_D_CODES + (size_t)2560 * 160,
+                     O_GU_SC = O_D_CODES + (size_t)STRATA_N_EMBD * (STRATA_N_FF / 4),
                      O_D_SC = O_GU_SC + (size_t)1280 * 40 * 2;
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
@@ -1758,7 +1758,7 @@ __dpct_inline__ void blob_dequant_kernel(const uint8_t *__restrict__ blob,
             sycl::vec<sycl::half, 1>(sycl::bit_cast<sycl::half, unsigned short>(
                                          (uint16_t)(sp[0] | (sp[1] << 8))))
                 .convert<float, sycl::rounding_mode::automatic>()[0];
-        uint16_t* o = gu16 + row * 2560 + byte * 4;
+        uint16_t* o = gu16 + row * STRATA_N_EMBD + byte * 4;
 #pragma unroll
         for (int k = 0; k < 4; ++k) { const float v = (float) (((c >> (2 * k)) & 3) - 1) * d; o[k] = HALF ? hf(v) : bf(v); }
     } else if (i < n_gu + n_d) {

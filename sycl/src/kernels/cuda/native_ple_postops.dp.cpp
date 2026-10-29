@@ -35,7 +35,7 @@
 
 namespace strata::kernels {
 namespace {
-constexpr int N = 2560, H = 4, D = N * H, HISTORY = 9;
+constexpr int N = STRATA_N_EMBD, H = STRATA_HC, D = N * H, HISTORY = 9;
 static_assert(N == strata::core::kCompiledGeometry.n_embd && H == strata::core::kCompiledGeometry.hc, "native_ple_postops is compiled for core/geometry.hpp");
 inline float warp_sum(float x) {
     /*

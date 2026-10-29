@@ -3603,7 +3603,7 @@ struct S26IQ3S {   // Split<21>::load with the grid from `grid` (LT) or iq3s_gri
     }
 };
 
-constexpr int S26_XMAX = 2560 / 32;   // q8_1 blocks of one activation row (n_embd 2560)
+constexpr int S26_XMAX = STRATA_S26_XMAX;   // q8_1 blocks of one activation row
 
 // S26 BAL: step I of a warp's RPW x NI items (item p = 32 I + lane): rows QA / QB (lanes >= THR take QB)
 template<int I, int NI, int RPW> struct S26Bal {

@@ -35,11 +35,13 @@
 namespace strata::kernels {
 namespace {
 
-// THE BLOB'S OWN GEOMETRY, from `include/strata/kernels/cpu/expert.hpp`.  Restated as literals because that
-// header is the CPU path's and this file must not silently follow it if the two ever disagree: the sizes below
-// are what the CPU kernel's indexing computes, and `moe_hit_parity` compares the two end to end.
-constexpr int H = 2560;
-constexpr int FF = 640;
+// THE BLOB'S OWN GEOMETRY, from `include/strata/kernels/cpu/expert.hpp`.  Restated rather than taken from that
+// header because that header is the CPU path's and this file must not silently follow it if the two ever
+// disagree: the sizes below are what the CPU kernel's indexing computes, and `moe_hit_parity` compares the two
+// end to end.  They now come from the build-time geometry profile, so the restatement still holds for whichever
+// qwen4exp shape this build targets while remaining independent of the CPU header's own constants.
+constexpr int H = STRATA_N_EMBD;
+constexpr int FF = STRATA_N_FF;
 static_assert(H == strata::core::kCompiledGeometry.n_embd && FF == strata::core::kCompiledGeometry.n_ff, "s2_expert_grouped is compiled for core/geometry.hpp");
 constexpr int QK = 64;                       // Q2_0's group: one fp16 scale per 64 weights
 constexpr int ROW_GU = H / 4;                // 640 B of codes per gate/up row (2 bits per element)
