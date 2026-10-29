@@ -33,11 +33,16 @@
 namespace strata::kernels::cpu {
 
 // ---- geometry, all of it fixed by the artifact (tools/verify_q2_0_geometry.py: 202/202 tensors at QK=64) ----
-inline constexpr int H = 2560;      // n_embd
-inline constexpr int FF = 640;      // expert intermediate width
-inline constexpr int NE = 512;      // routed experts per layer
+// The three widths come from the build-time geometry profile (include/strata/core/geometry_build.hpp), so
+// this file serves more than one qwen4exp revision.  Everything below derives from them, so a profile change
+// flows through ROW_GU / ROW_D / SC_GU / SC_D / BLOB without touching the layout code.
+inline constexpr int H = STRATA_N_EMBD;   // n_embd
+inline constexpr int FF = STRATA_N_FF;    // expert intermediate width
+inline constexpr int NE = STRATA_N_EXPERT; // routed experts per layer
 static_assert(H == strata::core::kCompiledGeometry.n_embd && FF == strata::core::kCompiledGeometry.n_ff,
               "the CPU expert path is compiled for core/geometry.hpp");
+static_assert(NE == strata::core::kCompiledGeometry.n_expert,
+              "the CPU expert path's expert count must match core/geometry.hpp");
 inline constexpr int QK = 64;       // QK2_0: weights per fp16 scale
 inline constexpr int QKA = 32;      // QK8_1/QK8_0: ACTIVATION elements per scale
 inline constexpr int BB = 18;       // bytes per 64-weight Q2_0 block: 2 fp16-scale + 16 codes
