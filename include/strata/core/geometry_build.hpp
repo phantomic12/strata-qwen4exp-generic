@@ -91,6 +91,16 @@
 #ifndef STRATA_IDX_TOP_K
 #define STRATA_IDX_TOP_K 262144
 #endif
+// The n-gram (PLE) table's head geometry.  This differs between the two models and is NOT derivable
+// from n_embd: Flash-Next packs 160-wide heads, 8 per n-gram step (160 x 16 = 2560); Whittle packs
+// 256-wide heads, 4 per step (256 x 8 = 2048).  The product of the two must equal n_embd, which
+// ngram.hpp static_asserts.
+#ifndef STRATA_PLE_HEAD_DIM
+#define STRATA_PLE_HEAD_DIM 256
+#endif
+#ifndef STRATA_HEADS_PER_NGRAM
+#define STRATA_HEADS_PER_NGRAM 4
+#endif
 
 #else
 
@@ -124,6 +134,13 @@
 #endif
 #ifndef STRATA_IDX_TOP_K
 #define STRATA_IDX_TOP_K 2048
+#endif
+// n-gram (PLE) head geometry: 160-wide heads, 8 per n-gram step (160 x 16 = 2560)
+#ifndef STRATA_PLE_HEAD_DIM
+#define STRATA_PLE_HEAD_DIM 160
+#endif
+#ifndef STRATA_HEADS_PER_NGRAM
+#define STRATA_HEADS_PER_NGRAM 8
 #endif
 
 #endif  // profile
@@ -189,6 +206,9 @@
 /// Stringify a macro value (for build messages that name a compiled width)
 #define STRATA_STR_(x) #x
 #define STRATA_STR(x) STRATA_STR_(x)
+
+/// The number of PLE heads: (ngram_size - 1) * heads_per_ngram.  16 upstream, 8 on w45.
+#define STRATA_PLE_N_HEADS (2 * STRATA_HEADS_PER_NGRAM)
 
 /// Q8_1 blocks of one activation row, as the S26 kernels index them
 #define STRATA_S26_XMAX (STRATA_N_EMBD / 32)
