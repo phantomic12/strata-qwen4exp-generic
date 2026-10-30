@@ -112,7 +112,40 @@ Two prerequisites that cost a cycle each:
   pack then reads as a canonical Q2_0 pack — which is what makes the AVX-512 gate fire on
   a machine that would otherwise have been fine.
 
-### The remaining blocker: expert tensor types
+### The remaining blocker: a GPU page fault inside prefill
+
+With the Q8_0 build the engine now gets all the way to a live session and then faults
+inside the prompt path:
+
+```
+strata generate: GPU 0: Intel(R) Arc(TM) Pro B60 Graphics, compute capability 20.1
+strata generate: PLE on, table 39040000 rows
+strata generate: session is up (engine 0.1.53)
+level_zero backend failed with error: 20 (UR_RESULT_ERROR_DEVICE_LOST)
+  at sycl/src/prefill/prefill.cpp:5051
+```
+
+`dmesg` shows the cause is a real out-of-bounds access, not a driver flake:
+
+```
+xe 0000:03:00.0: [drm] Tile0: GT0: Fault response: Unsuccessful -EINVAL
+xe 0000:03:00.0: [drm] exec queue reset detected
+```
+
+Six classes of Flash-Next literal have been found and fixed in the prompt path
+(`prefill.cpp` buffer plan, `kernels.dp.cpp` blob layout + QSA head indexing,
+`moe_fused.dp.cpp` / `moe_fused_iq.dp.cpp` accumulator row stride, `gdn_xe.hpp`
+v_heads). **The fault survives all of them**, so at least one more remains — the most
+likely place is a stride that is not a plain literal (a derived `ld`, a tile count, or a
+`static_assert`-free constant in an ESIMD/XMX kernel).
+
+Not established: whether this fault is *ours* or environmental. No model has yet run
+end-to-end on this engine on this box, so there is no known-good control. Getting one —
+a Flash-Next Q2_0 pack, which is what the SYCL port actually targets — would separate
+"my port has another bug" from "this build does not run on this machine at all". Until
+that control exists, treat the port as unproven past session setup.
+
+### The expert-format limit (independent of the above)
 
 `native_expert_supported()` requires the gate/up and down formats to be in
 `STRATA_GU_FMTS` / `STRATA_D_FMTS`. Read from the GGUF headers, Whittle's quants use:
@@ -124,18 +157,14 @@ Two prerequisites that cost a cycle each:
 | Q5_K_M | Q5_K | Q5_K ×20, Q6_K ×20 | **no** — Q5_K/Q6_K not in D_FMTS |
 | **Q8_0** | **Q8_0** | **Q8_0** | **yes** — type 8 is in both lists |
 
-So the engine reaches Whittle only from the **Q8_0** build. The K-quant expert types are in
-`is_iq()` but absent from the two format tables, i.e. the grouped kernels have no
-instantiations for them.
+So the engine reaches Whittle only from the **Q8_0** build, and only on a box with real
+RAM: the expert arena is 31.88 GiB, which does not fit the 31 GB test box alongside the
+dense set. `--stream-experts` (no host arena, experts pulled from the GGUF on demand)
+is the workable mode there.
 
-Two ways forward, in order of cost:
-
-1. **Use Q8_0** (48 GB). Works with no source change. Expert arena ~9.1 GiB (256 experts x
-   3 roles x 2048 x 512 at 8.5 bpw), so it needs a box with real RAM — the i7-10700's 31 GB
-   is marginal for the arena plus the host-side dense set, and the PLE table streams from disk.
-2. **Add the K-quant expert formats** to the two tables and write the kernels. Q4_K/Q6_K
-   would then cover Q4_K_M, and Q3_K/Q5_K cover Q3_K_M. This is real kernel work
-   (`Fmt<T>` specialisations + the grouped dot), not a table edit.
+Adding the K-quant expert formats is real kernel work (`Fmt<T>` specialisations plus the
+grouped dot), not a table edit — and it would be premature until the prefill fault above
+is understood.
 
 Not tested: numerics against a reference, throughput, or the Qwen3.6 (`qwen35moe`) path.
 This is a geometry-enablement fork, not a validated model port.
