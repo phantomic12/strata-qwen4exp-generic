@@ -1934,9 +1934,10 @@ __dpct_inline__ void split_q_kernel(const float *__restrict__ qf,
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
         item_ct1.get_local_id(2);
-    if (i >= T * 24 * 256) return;
-    const int64_t t = i / (24 * 256), h = (i / 256) % 24, d = i % 256;
-    q[i] = qf[t * 24 * 512 + h * 512 + d];
+    if (i >= T * STRATA_N_HEAD * STRATA_HEAD_DIM) return;
+    const int64_t t = i / (STRATA_N_HEAD * STRATA_HEAD_DIM), h = (i / STRATA_HEAD_DIM) % STRATA_N_HEAD,
+                  d = i % STRATA_HEAD_DIM;
+    q[i] = qf[t * STRATA_N_HEAD * (2 * STRATA_HEAD_DIM) + h * (2 * STRATA_HEAD_DIM) + d];
 }
 __dpct_inline__ void gate_attn_kernel(const float *__restrict__ a,
                                       const float *__restrict__ qf,
@@ -1946,11 +1947,13 @@ __dpct_inline__ void gate_attn_kernel(const float *__restrict__ a,
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
         item_ct1.get_local_id(2);
-    if (i >= T * 24 * 256) return;
-    const int64_t t = i / (24 * 256), h = (i / 256) % 24, d = i % 256;
-    o16[t * ld16 + h * 256 + d] =
+    if (i >= T * STRATA_N_HEAD * STRATA_HEAD_DIM) return;
+    const int64_t t = i / (STRATA_N_HEAD * STRATA_HEAD_DIM), h = (i / STRATA_HEAD_DIM) % STRATA_N_HEAD,
+                  d = i % STRATA_HEAD_DIM;
+    o16[t * ld16 + h * STRATA_HEAD_DIM + d] =
         hf(a[i] * (1.0f / (1.0f + sycl::native::exp(
-                                      -qf[t * 24 * 512 + h * 512 + 256 + d]))));
+                                      -qf[t * STRATA_N_HEAD * (2 * STRATA_HEAD_DIM) +
+                                          h * (2 * STRATA_HEAD_DIM) + STRATA_HEAD_DIM + d]))));
 }
 
 // one block per (token, kv head, 64-value group); 64 threads. KV streaming: the pool page only if the block is
@@ -1967,7 +1970,7 @@ kv_append_kernel(const float *__restrict__ K, const float *__restrict__ V,
     const int kvh = item_ct1.get_group(1), g = item_ct1.get_group(0) >> 1;
     const bool is_v = (item_ct1.get_group(0) & 1) != 0;
     const int d = g * 64 + item_ct1.get_local_id(2);
-    const float x = (is_v ? V : K)[t * 512 + kvh * 256 + d];
+    const float x = (is_v ? V : K)[t * STRATA_N_HEAD_KV * STRATA_HEAD_DIM + kvh * STRATA_HEAD_DIM + d];
     const int64_t pos = pos0 + t;
     const int64_t page = table[pos / page_size];
     const int64_t row = (page * 2 + kvh) * page_size + pos % page_size;
@@ -3095,7 +3098,7 @@ void split_q(const float* q_full, float* q, int64_t T, void* stream) {
 
         strata::q_of(stream)
             ->parallel_for<dpct_kernel_name<class split_q_kernel_83c16c>>(
-                sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * 24 * 256)) *
+                sycl::nd_range<3>(sycl::range(1, 1, blocks_for(T * STRATA_N_HEAD * STRATA_HEAD_DIM)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) {
@@ -3111,12 +3114,12 @@ void gate_attn(const float* attn, const float* q_full, uint16_t* out16, int64_t 
 
         strata::q_of(stream)
             ->submit([&](sycl::handler &cgh) {
-                auto ld16_ld16_ct4 = ld16 > 0 ? ld16 : 24 * 256;
+                auto ld16_ld16_ct4 = ld16 > 0 ? ld16 : STRATA_N_HEAD * STRATA_HEAD_DIM;
 
                 cgh.parallel_for<
                     dpct_kernel_name<class gate_attn_kernel_3fc329>>(
                     sycl::nd_range<3>(
-                        sycl::range(1, 1, blocks_for(T * 24 * 256)) *
+                        sycl::range(1, 1, blocks_for(T * STRATA_N_HEAD * STRATA_HEAD_DIM)) *
                             sycl::range(1, 1, 256),
                         sycl::range(1, 1, 256)),
                     exp_props, [=](sycl::nd_item<3> item_ct1) {
