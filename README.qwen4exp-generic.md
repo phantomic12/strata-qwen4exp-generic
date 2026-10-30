@@ -89,20 +89,53 @@ Verified: builds on an Arc Pro B60 (PCI `8086:e211`, `xe`, oneAPI 2026.1.1).
 
 ## Status and what is still missing
 
-The engine **compiles** for the `w45` profile. Two things remain before a Whittle
-end-to-end run, both outside the kernel geometry:
+The engine **compiles** for the `w45` profile, and a full Whittle pack builds end to end.
+What remains is a *quantisation-format* limit, not a geometry one.
 
-1. **The pack builder is Flash-Next-shaped.** `tools/pack_layer.py` asserts
-   `t.type_name == "Q2_0"`, plans 48 layers regardless of the file, and reads a module-level
-   `SHARD1` constant instead of the `--gguf` argument. Its expert arena is the fixed
-   1,382,400-byte layout (512 experts x 640). `STRATA_EXPERT_BLOB` now gives the right
-   number for w45 (884,736) but the packer does not consume it yet. For a Q3_K/Q4_K model
-   the native pack path (`native_experts.txt`) is the intended route.
+### The pack builds
 
-2. **`cpu_require_expert_support()` demands AVX-512** (VNNI + VBMI). The test box is an
-   i7-10700 (Comet Lake, AVX2 only), so it exits. The gate only fires for the canonical
-   Q2_0 pack — a legitimate native pack skips it — which is why fix (1) unblocks (2) on
-   AVX2 hardware.
+`tools/iq_pack.py` is the geometry-agnostic packer (it derives `n_layers` and `n_expert`
+from the file's own routers, and keeps quantized tensors in GGUF form). On a Q3_K_M Whittle:
+
+```
+index.txt: 901 tensors, 252 served natively, arena 0.91 GiB
+conversions.json: 404 tensors converted (60 exact, 344 rounded; max |err| 0.000964)
+compat-bf16: 364 tensors, 0.91 GiB; expert and PLE table bytes unchanged
+RC=0  ->  dense.bin, index.txt, native_experts.txt, tokenizer/, conversions.json
+```
+
+Two prerequisites that cost a cycle each:
+
+- `STRATA_GGUF_PY` must point at a llama.cpp `gguf-py` (the tool does not vendor it).
+- `strata_tokenizer.py` imports `regex`, which is not a stock-Python module; without it
+  `iq_pack.py` dies *after* writing `dense.bin` but *before* `native_experts.txt`, and the
+  pack then reads as a canonical Q2_0 pack — which is what makes the AVX-512 gate fire on
+  a machine that would otherwise have been fine.
+
+### The remaining blocker: expert tensor types
+
+`native_expert_supported()` requires the gate/up and down formats to be in
+`STRATA_GU_FMTS` / `STRATA_D_FMTS`. Read from the GGUF headers, Whittle's quants use:
+
+| quant | gate/up | down | GPU kernels? |
+|---|---|---|---|
+| Q3_K_M | Q3_K | Q4_K ×38, Q5_K ×2 | **no** — Q3_K not in GU_FMTS, Q5_K not in D_FMTS |
+| Q4_K_M | Q4_K | Q4_K ×20, Q6_K ×20 | **no** — Q6_K not in D_FMTS |
+| Q5_K_M | Q5_K | Q5_K ×20, Q6_K ×20 | **no** — Q5_K/Q6_K not in D_FMTS |
+| **Q8_0** | **Q8_0** | **Q8_0** | **yes** — type 8 is in both lists |
+
+So the engine reaches Whittle only from the **Q8_0** build. The K-quant expert types are in
+`is_iq()` but absent from the two format tables, i.e. the grouped kernels have no
+instantiations for them.
+
+Two ways forward, in order of cost:
+
+1. **Use Q8_0** (48 GB). Works with no source change. Expert arena ~9.1 GiB (256 experts x
+   3 roles x 2048 x 512 at 8.5 bpw), so it needs a box with real RAM — the i7-10700's 31 GB
+   is marginal for the arena plus the host-side dense set, and the PLE table streams from disk.
+2. **Add the K-quant expert formats** to the two tables and write the kernels. Q4_K/Q6_K
+   would then cover Q4_K_M, and Q3_K/Q5_K cover Q3_K_M. This is real kernel work
+   (`Fmt<T>` specialisations + the grouped dot), not a table edit.
 
 Not tested: numerics against a reference, throughput, or the Qwen3.6 (`qwen35moe`) path.
 This is a geometry-enablement fork, not a validated model port.
