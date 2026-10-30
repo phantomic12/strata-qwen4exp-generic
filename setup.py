@@ -100,6 +100,9 @@ HF_REVISIONS = {
     "unsloth/Qwen3.8-Flash-Next-GGUF": "38bb39ee97821de2c9009abb7e93950eec396e66",                   # 2026-09-30
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",                  # 2026-10-12
     "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF": "1ada08422e404aca51ab9df665f089f34c419c6b",           # 2026-10-13
+    # Whittle: logic65's Qwen3.6-35B-A3B base with 76 experts healed into every layer and a 10B n-gram table.
+    # Same qwen4exp family as Flash-Next but a different compiled shape -- the w45 geometry profile.
+    "logic65/Whittle-Qwen-3.8-45B-A3B-GGUF": "e2762dbec056f64b5e024ec1298947a09a525321",            # 2026-10-28
     "unsloth/DeepSeek-V4.1-Flash-1017-GGUF": "f924b94f19c1fea02c06a65c8475b0a45e2b88b1",             # 2026-10-20 (the port's reference)
     "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF": "cb02422c900df489cea5833e8a92171224059b3c",    # 2026-10-24 (ISTA-DASLab's final 1.75 / 2.00 / 2.25 bpw sets and Engram)
 }
@@ -345,6 +348,10 @@ FP4LOCAL_ENGINE = (0, 1, 45)
 # (ported from agentionai/Strata rc2, MIT); the sizes and SHA-256 are the Hub's LFS pointers
 # of the revision pinned in HF_REVISIONS.  The model's license is Qwen's.
 GYRO_ENGINE = (0, 1, 45, 1)
+# Whittle needs a build with the w45 geometry profile: the stock Flash-Next shape refuses the file at load
+# (geometry_unsupported names the 9 fields that differ).  (0, 2, 0) = the first engine of the 0.2 line, which is
+# where this fork's geometry profile lands.
+WHITTLE_ENGINE = (0, 2, 0)
 GYRO_FILES = {
     "Qwen3.8-Flash-Next-Gyro-S-TQ1_0.gguf":
         (58487015808, "c6ea1b08ca312f99095b27588ba35976b53f948268e7f91e7761926aa01d9c87"),
@@ -394,6 +401,19 @@ SWIFT_FILES = {
         (26750834816, "ef3bb04fb4e14f04624abd8acf25faf1603594a034050b048df85ec152ad5ae0"),
     "mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf":
         (907543520, "cd1140f4abba943ce8d9fa92fed8407e389954d26907efde7b72153c75bd8a60"),
+}
+# Whittle's four sizes at the pinned revision: name -> (bytes, sha256).  Single-file GGUFs (no shard split), so each
+# entry is one complete model.  Every hash below was read from the Hub's LFS pointers AND checked against the file
+# on disk; Q3_K_M and Q8_0 were built and loaded.
+WHITTLE_FILES = {
+    "Whittle-Qwen-3.8-45B-A3B-Q3_K_M.gguf":
+        (21310673216, "9f034b4322b0c29dadf26be9571c326ca94628601bfcaf4d995d39d5eb09b731"),
+    "Whittle-Qwen-3.8-45B-A3B-Q4_K_M.gguf":
+        (27096838464, "f483b9dd2b620d405cd3ad998cdfa21efa9b88f35bc42bab9d47b7fdf6714c5e"),
+    "Whittle-Qwen-3.8-45B-A3B-Q5_K_M.gguf":
+        (31944700224, "777775f132137fb8c1f9557c02a67d0aae8d07198303749f7f21dad73c771d56"),
+    "Whittle-Qwen-3.8-45B-A3B-Q8_0.gguf":
+        (48014414464, "b8d066203ec3ea773090994ec4b7e6323776b8089cc40b39db947dbe7f0d0867"),
 }
 # The Coder's IQ1_M shards and its picture reader (the original's file), same source and form.
 CODER_FILES = {
@@ -454,6 +474,33 @@ MODELS = {
              "download_gb": 188.2, "ram_gb": 136, "arena_gb": 128.3, "families": ("unsloth",), "budget": True,
              "shards": 6, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00006.gguf", "engine": (0, 1, 38),
              "vision": True},
+    # Whittle (logic65): a different qwen4exp SHAPE, not just different weights -- the w45 geometry profile
+    # (n_embd 2048, n_ff 512, 40 layers, 256 experts, 32 ssm value heads).  Its expert arena is sized from
+    # 3 * n_embd * n_ff * 256 experts * 40 layers, which reproduces the engine's own 31.88 GiB for Q8_0.
+    #
+    # The four sizes differ in more than size here.  native_expert_supported() asks for gate/up AND down types
+    # that the grouped kernels have instantiations for, and only Q8_0 qualifies:
+    #   Q3_K_M  Q3_K / Q4_K+Q5_K     Q3_K is absent from STRATA_GU_FMTS, Q5_K from STRATA_D_FMTS
+    #   Q4_K_M  Q4_K / Q4_K+Q6_K     Q6_K is absent from STRATA_D_FMTS
+    #   Q5_K_M  Q5_K / Q5_K+Q6_K     Q5_K and Q6_K are absent from STRATA_D_FMTS
+    #   Q8_0    Q8_0 / Q8_0          both present
+    # So Q8_0 is the only size this engine can run today; the others download, pack and load, then stop at
+    # "layer N's experts are X/Y (ggml types N/N), which this engine has no GPU kernels for".
+    "Whittle-Q8_0": {"about": "the only Whittle size this engine can run (every expert Q8_0); needs a 64 GB PC",
+                     "download_gb": 48.01, "ram_gb": 48, "arena_gb": 34.31, "families": ("whittle",),
+                     "file": "Whittle-Qwen-3.8-45B-A3B-Q8_0.gguf", "engine": WHITTLE_ENGINE},
+    "Whittle-Q5_K_M": {"about": "5-bit K-quant experts - packs and loads, but this engine has no Q5_K/Q6_K expert "
+                                "kernels, so it stops at load", "download_gb": 31.94, "ram_gb": 32,
+                       "arena_gb": 22.83, "families": ("whittle",), "engine": WHITTLE_ENGINE, "runnable": False,
+                       "file": "Whittle-Qwen-3.8-45B-A3B-Q5_K_M.gguf"},
+    "Whittle-Q4_K_M": {"about": "4-bit K-quant experts - packs and loads, but this engine has no Q6_K expert kernels, "
+                                "so it stops at load", "download_gb": 27.10, "ram_gb": 28, "arena_gb": 19.37,
+                       "families": ("whittle",), "engine": WHITTLE_ENGINE, "runnable": False,
+                       "file": "Whittle-Qwen-3.8-45B-A3B-Q4_K_M.gguf"},
+    "Whittle-Q3_K_M": {"about": "3-bit K-quant experts - the smallest Whittle; packs and loads, but this engine has "
+                                "no Q3_K/Q5_K expert kernels, so it stops at load", "download_gb": 21.31,
+                       "ram_gb": 20, "arena_gb": 15.22, "families": ("whittle",), "engine": WHITTLE_ENGINE,
+                       "runnable": False, "file": "Whittle-Qwen-3.8-45B-A3B-Q3_K_M.gguf"},
     # MODEL-UPDATE Phase 4: NVFP4 experts, ready-made packs (NVFP4_REPOS).  63.3 GiB (68.0 GB) of experts in the
     # pack's experts.bin; the low-RAM mode reads them from there on a PC whose RAM does not hold them.  NVIDIA only
     # (the HIP and SYCL engines have no NVFP4 kernels).  Images: both packs keep Qwen's vision tower unquantized, so the
@@ -601,6 +648,16 @@ FAMILIES = {
                 "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "name": "qwen3.8-flash-next-unsloth",
                 "vision": True, "pack_args": ["--compat-bf16"],
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS, **UNSLOTH_BIG_SHARDS}},
+    # logic65's Whittle: same qwen4exp architecture as Flash-Next, a different compiled shape (the w45 profile).
+    # Not a quant of Flash-Next -- a separately healed model -- so it is its own family rather than a size of one.
+    "whittle": {"title": "Whittle-Qwen-3.8-45B-A3B", "by": "logic65 (healed from Qwen3.6-35B-A3B)",
+                "about": "Flash-Next's architecture with 76 experts distilled into every layer and a 10B n-gram table; "
+                         "only its Q8_0 size has expert kernels in this engine",
+                "hf": hf("logic65/Whittle-Qwen-3.8-45B-A3B-GGUF"), "file": "Whittle-Qwen-3.8-45B-A3B-{q}.gguf",
+                "shards": 1, "tag": "whittle-", "name": "whittle-qwen-3.8-45b-a3b",
+                "pack_args": ["--compat-bf16"], "sha256": WHITTLE_FILES,
+                "license": "Qwen Community License 1.0 (Qwen3.6-35B-A3B's base, healed and quantized by logic65): "
+                           "https://huggingface.co/logic65/Whittle-Qwen-3.8-45B-A3B-GGUF"},
     # MODEL-UPDATE Phase 4: the original model with NVFP4 experts, as ready-made packs (NVFP4_REPOS): the files come
     # as the engine reads them (no GGUF to pack), each size has its own repository ("repo" in MODELS)
     # agentionai's Gyro quantizations (see GYRO_FILES): after the regular families, never the default
@@ -3793,21 +3850,28 @@ def recommended_size(family: str, names: list, ram: float, vram: float = 0.0) ->
     """The size the menu pre-selects (and --yes takes): the memory tier's size (RAM + VRAM, MEMORY_TIERS) when this
     family has it, else the family's recommended size when this PC's RAM fits it (UD-Q4_K_XL before UD-IQ4_XS), else
     the largest size that fits, else the first.  Recommend, never force: every other size stays a choice."""
+    # A size this engine has no expert kernels for is never pre-selected, and never chosen by --yes: it would
+    # download tens of GB and stop at load.  Families where every size runs (all but whittle) are unaffected.
+    runnable = [m for m in names if MODELS.get(m, {}).get("runnable", True)] or names
     tier = tier_pick(ram, vram)
-    if tier and tier[1] in names and family in ("qwen", "swift"):
+    if tier and tier[1] in runnable and family in ("qwen", "swift"):
         return tier[1]
     for m in RECOMMENDED_SIZES.get(family, ()):
-        if m in names and mem_have(m, ram, vram) >= MODELS[m]["ram_gb"]:
+        if m in runnable and mem_have(m, ram, vram) >= MODELS[m]["ram_gb"]:
             return m
-    fitting = [m for m in names if mem_have(m, ram, vram) >= MODELS[m]["ram_gb"]]
+    fitting = [m for m in runnable if mem_have(m, ram, vram) >= MODELS[m]["ram_gb"]]
     if fitting:
         return max(fitting, key=lambda m: MODELS[m]["download_gb"])
-    return "UD-IQ4_XS" if family == "unsloth" and "UD-IQ4_XS" in names else names[0]
+    return "UD-IQ4_XS" if family == "unsloth" and "UD-IQ4_XS" in names else runnable[0]
 
 
 def size_tag(family: str, m: str, installed: str | None = None) -> str:
     rec, have = m in RECOMMENDED_SIZES.get(family, ()), m == installed
-    return " (recommended, installed)" if rec and have else " (recommended)" if rec else " (installed)" if have else ""
+    # A size whose expert formats this engine has no kernels for is marked, not hidden: it is still worth having
+    # on disk for a future engine, and saying so beats a download that dies at load with no warning here.
+    dead = "" if MODELS.get(m, {}).get("runnable", True) else " (no expert kernels in this engine yet)"
+    return ((" (recommended, installed)" if rec and have else " (recommended)" if rec else " (installed)" if have
+             else "") + dead)
 
 
 def installed_size(family: str, names: list, have: list) -> str | None:
