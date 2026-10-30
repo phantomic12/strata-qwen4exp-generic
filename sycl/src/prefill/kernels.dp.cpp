@@ -1744,17 +1744,24 @@ __dpct_inline__ void blob_dequant_kernel(const uint8_t *__restrict__ blob,
                                          uint16_t *__restrict__ gu16,
                                          uint16_t *__restrict__ d16) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-    constexpr size_t O_D_CODES = (size_t)1280 * 640,
-                     O_GU_SC = O_D_CODES + (size_t)STRATA_N_EMBD * (STRATA_N_FF / 4),
-                     O_D_SC = O_GU_SC + (size_t)1280 * 40 * 2;
+    // The Q2_0 blob layout, in bytes: gate/up codes [2*n_ff rows][n_embd*2/8 B], down codes [n_embd rows]
+    // [n_ff*2/8 B], gate/up scales [2*n_ff][n_embd/64] f16, down scales [n_embd][n_ff/64] f16.
+    // (This is the canonical pack's fixed blob, not a profile axis -- the native packs this fork targets
+    // never take this path.)
+    constexpr size_t GU_ROWS = 2 * STRATA_N_FF, D_ROWS = STRATA_N_EMBD;
+    constexpr size_t GU_ROW_B = STRATA_N_EMBD * 2 / 8, D_ROW_B = STRATA_N_FF * 2 / 8;
+    constexpr size_t GU_SC_PER_ROW = STRATA_N_EMBD / 64, D_SC_PER_ROW = STRATA_N_FF / 64;
+    constexpr size_t O_D_CODES = GU_ROWS * GU_ROW_B,
+                     O_GU_SC = O_D_CODES + D_ROWS * D_ROW_B,
+                     O_D_SC = O_GU_SC + GU_ROWS * GU_SC_PER_ROW * 2;
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
         item_ct1.get_local_id(2); // one thread per 4 weights (one code byte)
-    const int64_t n_gu = 1280LL * 640, n_d = 2560LL * 160;
+    const int64_t n_gu = (int64_t) GU_ROWS * GU_ROW_B, n_d = (int64_t) D_ROWS * D_ROW_B;
     if (i < n_gu) {
-        const int64_t row = i / 640, byte = i % 640;
-        const uint8_t c = blob[row * 640 + byte];
-        const uint8_t* sp = blob + O_GU_SC + (size_t) (row * 40 + (byte * 4) / 64) * 2;
+        const int64_t row = i / (int64_t) GU_ROW_B, byte = i % (int64_t) GU_ROW_B;
+        const uint8_t c = blob[row * GU_ROW_B + byte];
+        const uint8_t* sp = blob + O_GU_SC + (size_t) (row * GU_SC_PER_ROW + (byte * 4) / 64) * 2;
         const float d =
             sycl::vec<sycl::half, 1>(sycl::bit_cast<sycl::half, unsigned short>(
                                          (uint16_t)(sp[0] | (sp[1] << 8))))
@@ -1763,14 +1770,14 @@ __dpct_inline__ void blob_dequant_kernel(const uint8_t *__restrict__ blob,
 #pragma unroll
         for (int k = 0; k < 4; ++k) { const float v = (float) (((c >> (2 * k)) & 3) - 1) * d; o[k] = HALF ? hf(v) : bf(v); }
     } else if (i < n_gu + n_d) {
-        const int64_t j = i - n_gu, row = j / 160, byte = j % 160;
-        const uint8_t c = blob[O_D_CODES + row * 160 + byte];
-        const uint8_t* sp = blob + O_D_SC + (size_t) (row * 10 + (byte * 4) / 64) * 2;
+        const int64_t j = i - n_gu, row = j / (int64_t) D_ROW_B, byte = j % (int64_t) D_ROW_B;
+        const uint8_t c = blob[O_D_CODES + row * D_ROW_B + byte];
+        const uint8_t* sp = blob + O_D_SC + (size_t) (row * D_SC_PER_ROW + (byte * 4) / 64) * 2;
         const float d =
             sycl::vec<sycl::half, 1>(sycl::bit_cast<sycl::half, unsigned short>(
                                          (uint16_t)(sp[0] | (sp[1] << 8))))
                 .convert<float, sycl::rounding_mode::automatic>()[0];
-        uint16_t* o = d16 + row * 640 + byte * 4;
+        uint16_t* o = d16 + row * STRATA_N_FF + byte * 4;
 #pragma unroll
         for (int k = 0; k < 4; ++k) { const float v = (float) (((c >> (2 * k)) & 3) - 1) * d; o[k] = HALF ? hf(v) : bf(v); }
     }
@@ -1781,9 +1788,9 @@ __dpct_inline__ void swiglu_il_kernel(const float *__restrict__ gu,
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
         item_ct1.get_local_id(2);
-    if (i >= n * 640) return;
-    const int64_t r = i / 640, k = i % 640;
-    const float g = gu[r * 1280 + 2 * k], u = gu[r * 1280 + 2 * k + 1];
+    if (i >= n * STRATA_N_FF) return;
+    const int64_t r = i / STRATA_N_FF, k = i % STRATA_N_FF;
+    const float g = gu[r * (2 * STRATA_N_FF) + 2 * k], u = gu[r * (2 * STRATA_N_FF) + 2 * k + 1];
     h16[i] = hf_sat(g / (1.0f + sycl::native::exp(-g)) * u);
 }
 __dpct_inline__ void swiglu_pair_kernel(const float *__restrict__ g,
@@ -1793,7 +1800,7 @@ __dpct_inline__ void swiglu_pair_kernel(const float *__restrict__ g,
     const int64_t i =
         (int64_t)item_ct1.get_group(2) * item_ct1.get_local_range(2) +
         item_ct1.get_local_id(2);
-    if (i >= n * 640) return;
+    if (i >= n * STRATA_N_FF) return;
     const float a = g[i];
     h16[i] = hf_sat(a / (1.0f + sycl::native::exp(-a)) * u[i]);
 }
@@ -2818,7 +2825,7 @@ void blob_dequant(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* s
             ->parallel_for<dpct_kernel_name<class blob_dequant_kernel_252bb1,
                                             dpct_kernel_scalar<false>>>(
                 sycl::nd_range<3>(
-                    sycl::range(1, 1, blocks_for(1280LL * 640 + 2560LL * 160)) *
+                    sycl::range(1, 1, blocks_for((size_t)(2 * STRATA_N_FF * (STRATA_N_EMBD * 2 / 8) + STRATA_N_EMBD * (STRATA_N_FF * 2 / 8)))) *
                         sycl::range(1, 1, 256),
                     sycl::range(1, 1, 256)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) {
@@ -2836,7 +2843,7 @@ void blob_dequant_f16(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, voi
             ->parallel_for<dpct_kernel_name<class blob_dequant_kernel_1d812a,
                                             dpct_kernel_scalar<true>>>(
                 sycl::nd_range<3>(
-                    sycl::range(1, 1, blocks_for(1280LL * 640 + 2560LL * 160)) *
+                    sycl::range(1, 1, blocks_for((size_t)(2 * STRATA_N_FF * (STRATA_N_EMBD * 2 / 8) + STRATA_N_EMBD * (STRATA_N_FF * 2 / 8)))) *
                         sycl::range(1, 1, 256),
                     sycl::range(1, 1, 256)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) {
@@ -2853,7 +2860,7 @@ void swiglu_interleaved(const float* gu, uint16_t* h16, int64_t n, void* stream)
 
         strata::q_of(stream)
             ->parallel_for<dpct_kernel_name<class swiglu_il_kernel_98d495>>(
-                sycl::nd_range<3>(sycl::range(1, 1, blocks_for(n * 640)) *
+                sycl::nd_range<3>(sycl::range(1, 1, blocks_for(n * STRATA_N_FF)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) {
@@ -2869,7 +2876,7 @@ void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void*
 
         strata::q_of(stream)
             ->parallel_for<dpct_kernel_name<class swiglu_pair_kernel_ab28da>>(
-                sycl::nd_range<3>(sycl::range(1, 1, blocks_for(n * 640)) *
+                sycl::nd_range<3>(sycl::range(1, 1, blocks_for(n * STRATA_N_FF)) *
                                       sycl::range(1, 1, 256),
                                   sycl::range(1, 1, 256)),
                 exp_props, [=](sycl::nd_item<3> item_ct1) {
