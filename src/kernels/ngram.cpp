@@ -2,6 +2,7 @@
 //
 // See include/strata/kernels/ngram.hpp for the semantics, the rival readings, and the note on MADV_RANDOM.
 #include "strata/kernels/ngram.hpp"
+#include "strata/core/geometry_build.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/artifact/dequant.hpp"
 #include "strata/kernels/f16_bits.hpp"
@@ -47,6 +48,25 @@ PleConsts ple_artifact_consts() {
     // ALSO in the metadata as its own array - and deriving one from the other would hide a mismatch between
     // them instead of surfacing it.  The parity test checks the two agree.
     PleConsts c{};
+    // These are MODEL DATA, not geometry: each model revision ships its own multipliers, per-head vocab
+    // sizes and head offsets in the GGUF (qwen4exp.ple.layer_multipliers / head_vocab_sizes /
+    // head_offsets).  They are written out once per profile here rather than derived from one another,
+    // because the metadata carries all three and deriving one would hide a mismatch instead of
+    // surfacing it.  The parity test checks that these agree with the file.
+#if defined(STRATA_GEOM_PROFILE_W45)
+    // Whittle-Qwen-3.8-45B-A3B (logic65): 8 heads of 4.88 M rows each.
+    //   ple.layer_multipliers = [32473892291597, 22010589867355, 6403636407469]
+    //   ple.head_vocab_sizes  = [4880000] x 8
+    //   ple.head_offsets      = [0, 4880000, 9760000, 14640000, 19520000, 24400000, 29280000, 34160000]
+    c.mult[0] = 32473892291597ull;
+    c.mult[1] = 22010589867355ull;
+    c.mult[2] = 6403636407469ull;
+    for (int i = 0; i < PLE_N_HEADS; ++i) {
+        c.vocab[i] = 4880000ull;
+        c.offset[i] = 4880000ull * (uint64_t) i;
+    }
+#else
+    // Qwen3.8-Flash-Next (ISTA-DASLab pack, docs/gguf-dump-shard1.txt verbatim): 16 heads of ~20 M rows.
     c.mult[0] = 23703573157769ull;
     c.mult[1] = 20109073645365ull;
     c.mult[2] = 8052911324071ull;
@@ -60,6 +80,7 @@ PleConsts ple_artifact_consts() {
         c.vocab[i] = vocab[i];
         c.offset[i] = offset[i];
     }
+#endif
     return c;
 }
 
