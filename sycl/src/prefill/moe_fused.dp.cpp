@@ -18,6 +18,7 @@
 // for the k of a half-block: mma k index 16h + 4t + j stands for weight (and activation) 16h + t + 4j.  The
 // activations are stored in it (perm32), and a lane's two B registers (h = 0 and 1) are adjacent: one 8-byte load.
 #define DPCT_PROFILING_ENABLED
+#include "strata/core/geometry.hpp"   // geometry profile macros
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
@@ -42,8 +43,9 @@ constexpr float MAGICF = 12582912.0f;
 // The Strata Q2_0 blob (moe_mmq.cu strata_q2_kernel, kernels.cu blob_dequant_kernel): gate/up codes [1280][640 B]
 // (rows interleaved: gate of feature f at row 2f, its up at 2f + 1), down codes [2560][160 B], gate/up scales
 // [1280][40] fp16, down scales [2560][10] fp16.
-constexpr size_t O_GU_CODES = 0, O_D_CODES = (size_t) 1280 * 640, O_GU_SC = O_D_CODES + (size_t) 2560 * 160,
-                 O_D_SC = O_GU_SC + (size_t) 1280 * 40 * 2;
+constexpr size_t O_GU_CODES = 0, O_D_CODES = (size_t) (2 * STRATA_N_FF) * (STRATA_N_EMBD * 2 / 8),
+                     O_GU_SC = O_D_CODES + (size_t) STRATA_N_EMBD * (STRATA_N_FF * 2 / 8),
+                 O_D_SC = O_GU_SC + (size_t) (2 * STRATA_N_FF) * (STRATA_N_EMBD / 64) * 2;
 constexpr int THREADS = 512;            // 16 warps: 4 along the weight rows (64 each) x 4 along the tile rows (16 each)
 constexpr int WROWS = 256;              // weight rows per work item: 128 features of gate/up, or 256 outputs of down
 constexpr int STAGES = 4;               // cp.async pipeline depth, one 64-weight block of K per stage
@@ -379,7 +381,7 @@ __dpct_inline__ void expert_kernel(
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     constexpr int NKB = GU ? 40 : 10; // 64-weight blocks along K
     constexpr int NFB = GU ? 5 : 10;                  // weight-row blocks per tile
-    constexpr int CODE_LD = GU ? 640 : 160;           // code bytes per weight row
+    constexpr int CODE_LD = GU ? (STRATA_N_EMBD * 2 / 8) : (STRATA_N_FF * 2 / 8);   // code bytes per weight row
     constexpr size_t O_CODES = GU ? O_GU_CODES : O_D_CODES, O_SC = GU ? O_GU_SC : O_D_SC;
     constexpr int ACT_LD = NKB * AB;                  // bytes per activation row: 3200 (a token), 800 (a row's H)
     constexpr unsigned M2 = 0x03030303u;
@@ -605,7 +607,7 @@ __dpct_inline__ void expert_kernel(
 #pragma unroll
                     for (int q = 0; q < 4; ++q) {
                         const int r = nb0 + 8 * n + 2 * tig + (q & 1);
-                        if (r < nrows) dm[(size_t) (row0 + r) * 2560 + rbase + (q < 2 ? ra[i] : rb[i])] = acc[i][n][q];
+                        if (r < nrows) dm[(size_t) (row0 + r) * STRATA_N_EMBD + rbase + (q < 2 ? ra[i] : rb[i])] = acc[i][n][q];
                     }
                 }
         }
@@ -650,7 +652,7 @@ expert_w11_kernel(const Batch b, const Tables tb, const uint8_t* __restrict__ ac
                   uint8_t* __restrict__ out, float* __restrict__ dm) {
 #if STRATA_FUSED_W11
     constexpr int NKB = GU ? 40 : 10;                 // 64-weight blocks along K
-    constexpr int NFB = (GU ? 1280 : 2560) / W_ROWS;  // work items per tile
+    constexpr int NFB = (GU ? (2 * STRATA_N_FF) : STRATA_N_EMBD) / W_ROWS;   // work items per tile
     constexpr int CODE_LD = GU ? 640 : 160;           // code bytes per weight row
     constexpr size_t O_CODES = GU ? O_GU_CODES : O_D_CODES, O_SC = GU ? O_GU_SC : O_D_SC;
     constexpr int ACT_LD = NKB * AB;                  // bytes per activation row
@@ -810,7 +812,7 @@ expert_w11_kernel(const Batch b, const Tables tb, const uint8_t* __restrict__ ac
                 for (int nt = 0; nt < 2; ++nt) {
                     const int r = 32 * wn + 16 * nt + l16;
                     if (r < nrows) {
-                        float* d = dm + (size_t) (row0 + r) * 2560 + rbase + 32 * wm + 16 * mt + hi;
+                        float* d = dm + (size_t) (row0 + r) * STRATA_N_EMBD + rbase + 32 * wm + 16 * mt + hi;
 #pragma unroll
                         for (int i = 0; i < 8; ++i) d[2 * i] = acc[mt][nt][i];
                     }
@@ -1082,8 +1084,8 @@ void experts(const Batch& b, int n_expert, int64_t n, const void* scratch, const
     // the most tiles the batch can have: every row in it, plus a partial tile per expert
     const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
 #if defined(__HIPCC__)
-    const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / W_ROWS), (int64_t) d.sms * wgp_blocks(d.occ_gu));
-    const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / W_ROWS), (int64_t) d.sms * wgp_blocks(d.occ_d));
+    const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * ((2 * STRATA_N_FF) / W_ROWS), (int64_t) d.sms * wgp_blocks(d.occ_gu));
+    const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (STRATA_N_EMBD / W_ROWS), (int64_t) d.sms * wgp_blocks(d.occ_d));
     expert_w11_kernel<true><<<g_gu, W_THREADS, 0, s>>>(b, tb, (const uint8_t*) xa, src, (uint8_t*) ha, nullptr);
     expert_w11_kernel<false><<<g_d, W_THREADS, 0, s>>>(b, tb, (const uint8_t*) ha, src, nullptr, dm);
 #else

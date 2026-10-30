@@ -3,13 +3,14 @@
 // chains, in the same order, but a 16-lane sub-group holds four columns x four row groups (lane % 4 = column,
 // lane / 4 = row group), so the two cross-row-group sums are sub-group shuffles instead of SLM round trips, and a
 // token needs one work-group barrier instead of five.  Bit-identical to variant 0 on an Arc A770.
+#include "strata/core/geometry.hpp"   // geometry profile macros
 #pragma once
 #include <sycl/sycl.hpp>
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 #include <cstdint>
 
 namespace strata::prefill::detail {
-constexpr int GDN_XE_S = 128, GDN_XE_HK = 16, GDN_XE_HV = 48, GDN_XE_C = 10240;
+constexpr int GDN_XE_S = STRATA_SSM_STATE_SIZE, GDN_XE_HK = STRATA_SSM_K_HEADS, GDN_XE_HV = STRATA_SSM_V_HEADS, GDN_XE_C = STRATA_HC_DIM;
 constexpr int GDN_XE_CB = 16, GDN_XE_NCB = GDN_XE_S / GDN_XE_CB;
 constexpr int GDN_XE_NT = GDN_XE_CB * 4;
 
