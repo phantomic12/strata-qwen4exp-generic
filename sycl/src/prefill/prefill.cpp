@@ -1123,7 +1123,7 @@ const MmqPlan& mmq_plan() {
         for (int64_t l = 0; on && l < layers; ++l) {
             const int gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42, dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
             // #420: a tile on every GPU for these shapes (gate+up: 1280 rows, down: N rows), else the FP16 path
-            if (!mmq::fits(gt, 1280) || !mmq::fits(dt, N)) {
+            if (!mmq::fits(gt, (2*STRATA_N_FF)) || !mmq::fits(dt, N)) {
                 p.fallback = true;
                 // the fused path's buffers (Xq, H) exist for it; a chunk it does not take (a small one) keeps the FP16 path
                 if (on && lay.native && fused::native_supported(gt, dt)) { p.fo[(size_t) l] = 1; p.any = true; }
@@ -1131,8 +1131,8 @@ const MmqPlan& mmq_plan() {
             }
             p.layer[(size_t) l] = 1;
             p.any = true;
-            p.gu_max = std::max(p.gu_max, mmq::matrix_bytes(gt, 1280, N));
-            p.d_max = std::max(p.d_max, mmq::matrix_bytes(dt, N, 640));
+            p.gu_max = std::max(p.gu_max, mmq::matrix_bytes(gt, (2*STRATA_N_FF), N));
+            p.d_max = std::max(p.d_max, mmq::matrix_bytes(dt, N, STRATA_N_FF));
         }
         return p;
     }();
@@ -1151,12 +1151,12 @@ bool fused_layout(size_t T, bool src) {
 // default): MMQ's, for T tokens.
 struct MoeBufs { size_t gu, h, xq, hq; };
 MoeBufs moe_bufs(size_t T, int64_t n_expert, bool fused) {
-    if (!fused) return {T * K * 1280, T * K * 640, mmq::q8_bytes((int64_t) (T * K), N), mmq::q8_bytes((int64_t) (T * K), 640)};
+    if (!fused) return {T * K * (2*STRATA_N_FF), T * K * STRATA_N_FF, mmq::q8_bytes((int64_t) (T * K), N), mmq::q8_bytes((int64_t) (T * K), STRATA_N_FF)};
     const size_t ts = (size_t) std::min<int64_t>((int64_t) T, stream_all_min() - 1);   // MMQ's last small chunk
-    return {std::max(ts * K * 1280, (fused::group_bytes((int64_t) (T * K), (int) n_expert) + 3) / 4),
-            std::max(ts * K * 640, (fused::act_bytes((int64_t) (T * K), 640) + 3) / 4),
+    return {std::max(ts * K * (2*STRATA_N_FF), (fused::group_bytes((int64_t) (T * K), (int) n_expert) + 3) / 4),
+            std::max(ts * K * STRATA_N_FF, (fused::act_bytes((int64_t) (T * K), STRATA_N_FF) + 3) / 4),
             std::max(mmq::q8_bytes((int64_t) (ts * K), N), fused::act_bytes((int64_t) T, N)),
-            mmq::q8_bytes((int64_t) (ts * K), 640)};
+            mmq::q8_bytes((int64_t) (ts * K), STRATA_N_FF)};
 }
 uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused) {
     const MmqPlan& mp = mmq_plan();
@@ -1166,9 +1166,9 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused) {
     a.take<int32_t>(T * K, ok);
     if (mp.fallback) a.take<uint16_t>(T * K * N, ok);
     a.take<float>(mb.gu, ok);
-    if (mp.fallback) a.take<uint16_t>(T * K * 640, ok);
-    a.take<float>(T * K * N, ok); a.take<float>(T * 640, ok);
-    a.take<float>(T * 640, ok); a.take<uint16_t>(T * 640, ok); a.take<float>(T * N, ok); a.take<float>(T, ok);
+    if (mp.fallback) a.take<uint16_t>(T * K * STRATA_N_FF, ok);
+    a.take<float>(T * K * N, ok); a.take<float>(T * STRATA_N_FF, ok);
+    a.take<float>(T * STRATA_N_FF, ok); a.take<uint16_t>(T * STRATA_N_FF, ok); a.take<float>(T * N, ok); a.take<float>(T, ok);
     if (mp.any) {
         a.take<uint8_t>(mb.xq, ok);
         a.take<float>(mb.h, ok);
@@ -1469,9 +1469,9 @@ bool Prefill::carve(size_t T, void* alloc) {
         const MmqPlan& mp = mmq_plan();
         m.Xs = mp.fallback ? c.take<uint16_t>(T * K * N, ok) : nullptr;
         m.GU = c.take<float>(mb.gu, ok);
-        m.Hh = mp.fallback ? c.take<uint16_t>(T * K * 640, ok) : nullptr;
+        m.Hh = mp.fallback ? c.take<uint16_t>(T * K * STRATA_N_FF, ok) : nullptr;
         m.Dm = c.take<float>(T * K * N, ok);
-        m.sgate = c.take<float>(T * 640, ok); m.sup = c.take<float>(T * 640, ok); m.sh_h = c.take<uint16_t>(T * 640, ok);
+        m.sgate = c.take<float>(T * STRATA_N_FF, ok); m.sup = c.take<float>(T * STRATA_N_FF, ok); m.sh_h = c.take<uint16_t>(T * STRATA_N_FF, ok);
         m.shared = c.take<float>(T * N, ok); m.sg = c.take<float>(T, ok);
         if (mp.any) {
             m.Xq = c.take<uint8_t>(mb.xq, ok);
@@ -2026,9 +2026,9 @@ bool Prefill::set_peer(core::PeerExperts *peer, int64_t cap_rows,
         pp->G = m.T_max;              // one expert never has more rows than the chunk has tokens
         const int64_t Gr = pp->G;
         pp->Xq_g = take(mmq::q8_bytes(Gr, N));
-        pp->Hq_g = take(mmq::q8_bytes(Gr, 640));
-        pp->GU_g = (float*) take((size_t) Gr * 1280 * 4);
-        pp->H_g = (float*) take((size_t) Gr * 640 * 4);
+        pp->Hq_g = take(mmq::q8_bytes(Gr, STRATA_N_FF));
+        pp->GU_g = (float*) take((size_t) Gr * (2*STRATA_N_FF) * 4);
+        pp->H_g = (float*) take((size_t) Gr * STRATA_N_FF * 4);
         pp->Dm_b[0] = (float*) take((size_t) Gr * N * 4);
         pp->Dm_b[1] = (float*) take((size_t) Gr * N * 4);
         for (int b = 0; b < 2 && ok; ++b)
@@ -2062,9 +2062,9 @@ bool Prefill::set_peer(core::PeerExperts *peer, int64_t cap_rows,
         }
     } else {
         pp->Xq = take(mmq::q8_bytes(R, N));
-        pp->Hq = take(mmq::q8_bytes(R, 640));
-        pp->GU = (float*) take((size_t) R * 1280 * 4);
-        pp->H = (float*) take((size_t) R * 640 * 4);
+        pp->Hq = take(mmq::q8_bytes(R, STRATA_N_FF));
+        pp->GU = (float*) take((size_t) R * (2*STRATA_N_FF) * 4);
+        pp->H = (float*) take((size_t) R * STRATA_N_FF * 4);
         pp->Dm = (float*) take((size_t) R * N * 4);
     }
     const int64_t Rt = pp->cap_rows;
@@ -3497,7 +3497,7 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                     const float* had_sx = had_gu ? m.had_sx[(size_t) l] : nullptr;
                     const float* had_sh = had_d ? m.had_sh[(size_t) l] : nullptr;
                     auto had_h = [&](int64_t row0, int64_t nrows) {
-                        if (had_d) strata::kernels::hadamard_rows_f16(m.Hh + row0 * 640, nrows, 640, had_block, had_sh, m.cs);
+                        if (had_d) strata::kernels::hadamard_rows_f16(m.Hh + row0 * STRATA_N_FF, nrows, STRATA_N_FF, had_block, had_sh, m.cs);
                     };
                     const int mmq_gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42;
                     const int mmq_dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
@@ -3709,8 +3709,8 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                                          (size_t)T * K * 4);
                         }
                         n_order = order.size();
-                        const size_t mmq_gub = use_mmq ? mmq::matrix_bytes(mmq_gt, 1280, N) : 0;
-                        const size_t mmq_db = use_mmq ? mmq::matrix_bytes(mmq_dt, N, 640) : 0;
+                        const size_t mmq_gub = use_mmq ? mmq::matrix_bytes(mmq_gt, (2*STRATA_N_FF), N) : 0;
+                        const size_t mmq_db = use_mmq ? mmq::matrix_bytes(mmq_dt, N, STRATA_N_FF) : 0;
                         pt.mark(kPfGather, cs);
                         if (use_mmq) {
                             // step 2b: the layer's activations as q8_1 rows in expert order, straight from `mixed`
@@ -3900,19 +3900,19 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                                                0, MMQ_TAIL);
                                     mmq::quantize(P.mixed, P.src + r0, P.Xq_g, mmq_gt, N, N, nr, ps);
                                     mmq::Product gu;
-                                    gu.w = P.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
+                                    gu.w = P.grp_gu; gu.type = mmq_gt; gu.w_rows = (2*STRATA_N_FF); gu.w_cols = N; gu.expert_bytes = mmq_gub;
                                     gu.n = ngx; gu.xq = P.Xq_g; gu.bounds = rel; gu.ids = P.ident;
-                                    gu.total_rows = nr; gu.max_rows = maxr; gu.dst = P.GU_g; gu.ld_dst = 1280;
+                                    gu.total_rows = nr; gu.max_rows = maxr; gu.dst = P.GU_g; gu.ld_dst = (2*STRATA_N_FF);
                                     P.run_ctx->run(gu, ps);
-                                    mmq::swiglu(P.GU_g, P.H_g, nr, 640, !lay.native, ps);
-                                    mmq::quantize(P.H_g, nullptr, P.Hq_g, mmq_dt, 640, 640, nr, ps);
+                                    mmq::swiglu(P.GU_g, P.H_g, nr, STRATA_N_FF, !lay.native, ps);
+                                    mmq::quantize(P.H_g, nullptr, P.Hq_g, mmq_dt, STRATA_N_FF, STRATA_N_FF, nr, ps);
                                     const int b = (int) (g2 & 1);
                                     if (P.dm_live[b])
                                         ps->ext_oneapi_submit_barrier(
                                             {*P.ev_dm[b]}); // its last rows
                                                             // have left
                                     mmq::Product dn;
-                                    dn.w = P.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
+                                    dn.w = P.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = STRATA_N_FF; dn.expert_bytes = mmq_db;
                                     dn.n = ngx; dn.xq = P.Hq_g; dn.bounds = rel;
                                     dn.ids = P.ident; dn.total_rows = nr; dn.max_rows = maxr; dn.dst = P.Dm_b[b];
                                     dn.ld_dst = N;
@@ -3999,14 +3999,14 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                                     ps->memset(P.grp_d + (size_t)ngx * mmq_db,
                                                0, MMQ_TAIL);
                                     mmq::Product gu;
-                                    gu.w = P.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
+                                    gu.w = P.grp_gu; gu.type = mmq_gt; gu.w_rows = (2*STRATA_N_FF); gu.w_cols = N; gu.expert_bytes = mmq_gub;
                                     gu.n = ngx; gu.xq = P.Xq; gu.bounds = P.bounds + j0; gu.ids = P.ident;
-                                    gu.total_rows = rows_peer; gu.max_rows = maxr; gu.dst = P.GU; gu.ld_dst = 1280;
+                                    gu.total_rows = rows_peer; gu.max_rows = maxr; gu.dst = P.GU; gu.ld_dst = (2*STRATA_N_FF);
                                     P.run_ctx->run(gu, ps);
-                                    mmq::swiglu(P.GU + r0 * 1280, P.H + r0 * 640, nr, 640, !lay.native, ps);
-                                    mmq::quantize(P.H + r0 * 640, nullptr, P.Hq, mmq_dt, 640, 640, nr, ps);
+                                    mmq::swiglu(P.GU + r0 * (2*STRATA_N_FF), P.H + r0 * STRATA_N_FF, nr, STRATA_N_FF, !lay.native, ps);
+                                    mmq::quantize(P.H + r0 * STRATA_N_FF, nullptr, P.Hq, mmq_dt, STRATA_N_FF, STRATA_N_FF, nr, ps);
                                     mmq::Product dn;
-                                    dn.w = P.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
+                                    dn.w = P.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = STRATA_N_FF; dn.expert_bytes = mmq_db;
                                     dn.n = ngx; dn.xq = P.Hq; dn.bounds = P.bounds + n + 1 + g2 * (MMQ_GROUP + 1);
                                     dn.ids = P.ident; dn.total_rows = nr; dn.max_rows = maxr; dn.dst = P.Dm + r0 * N;
                                     dn.ld_dst = N;
@@ -4296,8 +4296,8 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                                     pt.mark(kPfGemmGU, cs);
                                     if (i8::workspace(lo8, (int) N, f.n_ff, ws8, m.cs)) {
                                         i8::quantize_rows(m.Xs + xg_r0 * N, lo8, (int) N, ws8.xq, ws8.dx, m.cs);
-                                        if (i8::gate_up(f.gu_type, xg_g, f.up_off, f.n_ff, lo8, (int) N, ws8.xq, ws8.dx, m.GU + xg_r0 * 1280, m.cs)) {
-                                            i8::swiglu_quantize(m.GU + xg_r0 * 1280, lo8, f.n_ff, ws8.hq, ws8.dh, m.cs);
+                                        if (i8::gate_up(f.gu_type, xg_g, f.up_off, f.n_ff, lo8, (int) N, ws8.xq, ws8.dx, m.GU + xg_r0 * (2*STRATA_N_FF), m.cs)) {
+                                            i8::swiglu_quantize(m.GU + xg_r0 * (2*STRATA_N_FF), lo8, f.n_ff, ws8.hq, ws8.dh, m.cs);
                                             pt.mark(kPfGemmD, cs);
                                             done8 = i8::down(f.d_type, xg_g, f.down_off, (int) N, lo8, f.n_ff, ws8.hq, ws8.dh, m.Dm + xg_r0 * N, m.cs);
                                         }
@@ -4322,11 +4322,11 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                                         strata::kernels::iq_dequant_expert_f16(f.gu_type, f.d_type, xg_g[i], xg_u[i], xg_d[i], f.n_ff, f.n_embd,
                                                                                m.dq_gu[qd], m.dq_d[qd], m.cs);
                                         pt.mark(kPfGemmGU, cs);
-                                        m.gemm.f16(m.Xs + o * N, m.dq_gu[qd], m.GU + o * 1280, xg_c[i], 1280, N);
-                                        swiglu_interleaved(m.GU + o * 1280, m.Hh + o * 640, xg_c[i], m.cs);
+                                        m.gemm.f16(m.Xs + o * N, m.dq_gu[qd], m.GU + o * (2*STRATA_N_FF), xg_c[i], (2*STRATA_N_FF), N);
+                                        swiglu_interleaved(m.GU + o * (2*STRATA_N_FF), m.Hh + o * STRATA_N_FF, xg_c[i], m.cs);
                                         had_h(o, xg_c[i]);
                                         pt.mark(kPfGemmD, cs);
-                                        m.gemm.f16(m.Hh + o * 640, m.dq_d[qd], m.Dm + o * N, xg_c[i], N, 640);
+                                        m.gemm.f16(m.Hh + o * STRATA_N_FF, m.dq_d[qd], m.Dm + o * N, xg_c[i], N, STRATA_N_FF);
                                         o += xg_c[i];
                                     }
                                 }
@@ -4352,12 +4352,12 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                             if (nr / xg_n < xg_max) {
                                 pt.mark(kPfGemmGU, cs);
                                 strata::kernels::iq_xmx_grouped(f.gu_type, xg_g, xg_u, xg_c, xg_n, m.Xs + xg_r0 * N,
-                                                                m.GU + xg_r0 * 1280, 1280, (int) N, m.cs);
-                                swiglu_interleaved(m.GU + xg_r0 * 1280, m.Hh + xg_r0 * 640, nr, m.cs);
+                                                                m.GU + xg_r0 * (2*STRATA_N_FF), (2*STRATA_N_FF), (int) N, m.cs);
+                                swiglu_interleaved(m.GU + xg_r0 * (2*STRATA_N_FF), m.Hh + xg_r0 * STRATA_N_FF, nr, m.cs);
                                 had_h(xg_r0, nr);
                                 pt.mark(kPfGemmD, cs);
-                                strata::kernels::iq_xmx_grouped(f.d_type, xg_d, nullptr, xg_c, xg_n, m.Hh + xg_r0 * 640,
-                                                                m.Dm + xg_r0 * N, (int) N, 640, m.cs);
+                                strata::kernels::iq_xmx_grouped(f.d_type, xg_d, nullptr, xg_c, xg_n, m.Hh + xg_r0 * STRATA_N_FF,
+                                                                m.Dm + xg_r0 * N, (int) N, STRATA_N_FF, m.cs);
                             } else {
                                 int64_t o = xg_r0;
                                 for (int i = 0; i < xg_n; ++i) {
@@ -4367,11 +4367,11 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                                                                        m.dq_gu[q], m.cs);
                                     strata::kernels::iq_dequant_f16(f.d_type, xg_d[i], f.n_embd * f.n_ff, m.dq_d[q], m.cs);
                                     pt.mark(kPfGemmGU, cs);
-                                    m.gemm.f16(m.Xs + o * N, m.dq_gu[q], m.GU + o * 1280, xg_c[i], 1280, N);
-                                    swiglu_interleaved(m.GU + o * 1280, m.Hh + o * 640, xg_c[i], m.cs);
+                                    m.gemm.f16(m.Xs + o * N, m.dq_gu[q], m.GU + o * (2*STRATA_N_FF), xg_c[i], (2*STRATA_N_FF), N);
+                                    swiglu_interleaved(m.GU + o * (2*STRATA_N_FF), m.Hh + o * STRATA_N_FF, xg_c[i], m.cs);
                                     had_h(o, xg_c[i]);
                                     pt.mark(kPfGemmD, cs);
-                                    m.gemm.f16(m.Hh + o * 640, m.dq_d[q], m.Dm + o * N, xg_c[i], N, 640);
+                                    m.gemm.f16(m.Hh + o * STRATA_N_FF, m.dq_d[q], m.Dm + o * N, xg_c[i], N, STRATA_N_FF);
                                     o += xg_c[i];
                                 }
                             }
@@ -4425,15 +4425,15 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                                 m.cs->memset(m.grp_d + (size_t)ngx * mmq_db, 0,
                                              MMQ_TAIL);
                                 mmq::Product gu;
-                                gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
+                                gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = (2*STRATA_N_FF); gu.w_cols = N; gu.expert_bytes = mmq_gub;
                                 gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;
-                                gu.total_rows = T * K; gu.max_rows = maxr; gu.dst = m.GU; gu.ld_dst = 1280;
+                                gu.total_rows = T * K; gu.max_rows = maxr; gu.dst = m.GU; gu.ld_dst = (2*STRATA_N_FF);
                                 m.mmq_ctx->run(gu, m.cs);
-                                mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
+                                mmq::swiglu(m.GU + r0 * (2*STRATA_N_FF), m.H + r0 * STRATA_N_FF, nr, STRATA_N_FF, !lay.native, m.cs);
                                 pt.mark(kPfGemmD, cs);
-                                mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs);
+                                mmq::quantize(m.H + r0 * STRATA_N_FF, nullptr, m.Hq, mmq_dt, STRATA_N_FF, STRATA_N_FF, nr, m.cs);
                                 mmq::Product dn;
-                                dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
+                                dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = STRATA_N_FF; dn.expert_bytes = mmq_db;
                                 dn.n = ngx; dn.xq = m.Hq; dn.bounds = m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1);
                                 dn.ids = m.ids_identity; dn.total_rows = nr; dn.max_rows = maxr; dn.dst = m.Dm + r0 * N;
                                 dn.ld_dst = N;
@@ -4497,29 +4497,29 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                                 const int64_t r0 = m.off[(size_t) order[j0]];
                                 pt.mark(kPfGemmGU, cs);
                                 if (nr / ng < strata::prefill::xmx::gu_max_mean()) {
-                                    strata::prefill::xmx::grouped_f16(m.Xs + r0 * N, wg, gc, ng, m.GU + r0 * 1280, 1280,
+                                    strata::prefill::xmx::grouped_f16(m.Xs + r0 * N, wg, gc, ng, m.GU + r0 * (2*STRATA_N_FF), (2*STRATA_N_FF),
                                                                       (int) N, m.cs);
                                 } else {
                                     int64_t o = r0;
                                     for (int i = 0; i < ng; ++i) {
-                                        m.gemm.f16(m.Xs + o * N, wg[i], m.GU + o * 1280, gc[i], 1280, N);
+                                        m.gemm.f16(m.Xs + o * N, wg[i], m.GU + o * (2*STRATA_N_FF), gc[i], (2*STRATA_N_FF), N);
                                         o += gc[i];
                                     }
                                 }
-                                swiglu_interleaved(m.GU + r0 * 1280, m.Hh + r0 * 640, nr, m.cs);
+                                swiglu_interleaved(m.GU + r0 * (2*STRATA_N_FF), m.Hh + r0 * STRATA_N_FF, nr, m.cs);
                                 had_h(r0, nr);
                                 pt.mark(kPfGemmD, cs);
-                                strata::prefill::xmx::grouped_f16(m.Hh + r0 * 640, wd, gc, ng, m.Dm + r0 * N, (int) N, 640,
+                                strata::prefill::xmx::grouped_f16(m.Hh + r0 * STRATA_N_FF, wd, gc, ng, m.Dm + r0 * N, (int) N, STRATA_N_FF,
                                                                   m.cs);
                                 return true;
                             }
                             const int64_t o0 = m.off[(size_t) e], ne = m.cnt[(size_t) e];
                             pt.mark(kPfGemmGU, cs);
-                            m.gemm.f16(m.Xs + o0 * N, m.dq_gu[q], m.GU + o0 * 1280, ne, 1280, N);
-                            swiglu_interleaved(m.GU + o0 * 1280, m.Hh + o0 * 640, ne, m.cs);
+                            m.gemm.f16(m.Xs + o0 * N, m.dq_gu[q], m.GU + o0 * (2*STRATA_N_FF), ne, (2*STRATA_N_FF), N);
+                            swiglu_interleaved(m.GU + o0 * (2*STRATA_N_FF), m.Hh + o0 * STRATA_N_FF, ne, m.cs);
                             had_h(o0, ne);
                             pt.mark(kPfGemmD, cs);
-                            m.gemm.f16(m.Hh + o0 * 640, m.dq_d[q], m.Dm + o0 * N, ne, N, 640);
+                            m.gemm.f16(m.Hh + o0 * STRATA_N_FF, m.dq_d[q], m.Dm + o0 * N, ne, N, STRATA_N_FF);
                             return true;
                         }
                         catch (sycl::exception const &exc) {
@@ -4630,9 +4630,9 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                         }
                         };
                         // (fused: GU and H hold the grouping tables and int8 rows, not floats)
-                        const int64_t bgu = fused_l ? 0 : bad(m.GU, T * K * 1280), bdm = bad(m.Dm, T * K * N),
+                        const int64_t bgu = fused_l ? 0 : bad(m.GU, T * K * (2*STRATA_N_FF)), bdm = bad(m.Dm, T * K * N),
                                       bbo = bad(m.bo, T * N);
-                        const int64_t bh = m.H && !fused_l ? bad(m.H, T * K * 640) : -1;
+                        const int64_t bh = m.H && !fused_l ? bad(m.H, T * K * STRATA_N_FF) : -1;
                         // the fp16 inputs of the experts' GEMMs: the gathered activations and the last dequantized
                         // gate/up (non-finite count, largest finite magnitude)
                         auto bad16 = [&](const uint16_t* d, int64_t n, double& mx) {
@@ -4650,7 +4650,7 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                         };
                         double mxs = 0, mxq = 0;
                         const int64_t bxs = (!use_mmq && m.Xs) ? bad16(m.Xs, T * K * N, mxs) : -1;
-                        const int64_t bdq = (!use_mmq && m.dq_gu[0]) ? bad16(m.dq_gu[0], (int64_t) 1280 * N, mxq) : -1;
+                        const int64_t bdq = (!use_mmq && m.dq_gu[0]) ? bad16(m.dq_gu[0], (int64_t) (2*STRATA_N_FF) * N, mxq) : -1;
                         static int64_t reported = -1;
                         if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks)
                             std::fprintf(stderr, "strata dbg: layer %lld fp16 inputs: activations %lld non-finite (max %.3g), "
