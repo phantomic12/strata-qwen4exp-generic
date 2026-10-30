@@ -5,6 +5,7 @@
 // MIT license, third_party/ggml/LICENSE).  The block structs and codebook grids come from its ggml-common.h,
 // included unchanged.
 #define DPCT_PROFILING_ENABLED
+#include "strata/core/geometry.hpp"   // geometry profile macros
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_math.hpp"
