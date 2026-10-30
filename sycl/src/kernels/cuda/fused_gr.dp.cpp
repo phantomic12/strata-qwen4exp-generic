@@ -1151,7 +1151,7 @@ auto &lo = *sycl::ext::oneapi::group_local_memory_for_overwrite<
 //    accumulates its chunks lane + 32 q in ascending order, as in the plain read with either tile.  Before sm_80
 //    (and on HIP) the staging is a plain copy: the same bits, only not asynchronous.
 constexpr int kHcPlain = 1, kHcSplit = 2, kHcStaged = 3;
-constexpr int H_TILE = 1280;                          // staged tile: half a stream = 160 chunks of 8, 5 per lane
+constexpr int H_TILE = STRATA_N_EMBD / 2;              // staged tile: half a stream (1280 upstream, 1024 on w45)
 constexpr int HQ = H_TILE / 8 / 32;
 constexpr int N_HTILES = D / H_TILE;                  // 8
 static_assert(N % H_TILE == 0, "a staged tile never straddles two streams");

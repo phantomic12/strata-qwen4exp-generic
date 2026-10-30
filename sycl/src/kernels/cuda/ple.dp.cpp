@@ -17,6 +17,7 @@
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
+#include "strata/core/geometry.hpp"   // STRATA_N_EMBD / STRATA_HC_DIM for the native PLE key check
 #include "strata/kernels/ple.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/f16_bits.hpp"

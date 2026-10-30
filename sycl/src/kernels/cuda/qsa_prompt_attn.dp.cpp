@@ -23,8 +23,8 @@
 namespace strata::kernels {
 namespace {
 
-constexpr int HD = 256;           // head_dim
-constexpr int G = 12;             // query heads per KV head
+constexpr int HD = STRATA_HEAD_DIM;           // head_dim
+constexpr int G = STRATA_N_HEAD / STRATA_N_HEAD_KV;   // query heads per KV head
 static_assert(HD == strata::core::kCompiledGeometry.head_dim && G == strata::core::kCompiledGeometry.n_head / strata::core::kCompiledGeometry.n_head_kv, "qsa_prompt_attn is compiled for core/geometry.hpp");
 #ifndef D1_CH
 #define D1_CH 32

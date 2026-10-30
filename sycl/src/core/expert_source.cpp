@@ -2426,7 +2426,7 @@ void expert_pool_dispatch(void* user, const float* x_f, const int32_t* ids, cons
     // is finite and plausible.  Refuse, name the number, and let the driver report it.
     if (n_embd != H) {
         d.failed = true;
-        d.fail = "the expert kernel is compiled for a " + std::to_string(STRATA_N_EMBD) + "-wide activation";
+        d.fail = "the expert kernel is compiled for a " STRATA_STR(STRATA_N_EMBD) "-wide activation";
         d.fail_layer = d.layers;
         return;
     }

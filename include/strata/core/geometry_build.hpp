@@ -186,5 +186,9 @@
 #define STRATA_EXPERT_BLOB (3u * STRATA_N_EMBD * STRATA_N_FF * 18u / 64u)
 #endif
 
+/// Stringify a macro value (for build messages that name a compiled width)
+#define STRATA_STR_(x) #x
+#define STRATA_STR(x) STRATA_STR_(x)
+
 /// Q8_1 blocks of one activation row, as the S26 kernels index them
 #define STRATA_S26_XMAX (STRATA_N_EMBD / 32)
