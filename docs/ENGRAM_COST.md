@@ -112,9 +112,34 @@ engram_head_dim             256              Whittle: 256
 engram_compressed_vocab_size 99,092          Whittle: none
 ```
 
-Two injection sites instead of one, 3-gram–4-gram instead of 2-gram–3-gram, 197 GB of table (fp8) instead
+Two injection sites instead of one, 2-gram–4-gram instead of 2-gram–3-gram, 197 GB of table (fp8) instead
 of Whittle's 10 GB. The modeling code is public: `inference/engram.py` (184 lines) and the `Engram` class
 at `inference/model.py:296-365`.
+
+### Correction: the gate is NOT a V4.1 idea we lack
+
+An earlier revision of this document called the signed-sqrt gate the most valuable thing to steal. **That
+was wrong — Whittle already has exactly that gate.** `Qwen4ExpTextPLELayer.forward`:
+
+```python
+gate = (key_normed * query_normed).sum(dim=-1, keepdim=True) / math.sqrt(self.hidden_size)
+gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+gated_value = torch.sigmoid(gate) * value.unsqueeze(-2)
+```
+
+V4.1's `Engram.forward`:
+
+```python
+dot  = (h * weight * key).sum(-1) * rstd * dim**-0.5
+gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(self.clamp_value).sqrt(), dot))
+```
+
+Same construction. Every difference is second-order: V4.1 uses a learned `q_weight * k_weight` product
+instead of a fixed query/key split, joint RMS normalisation (`rstd`) instead of separate `norm_query` /
+`norm_key` modules, and a slightly different floor clamp. So there is no free architectural win here, and
+the gate cannot be the explanation for head 3 — it exists, and head 3 still trained quiet. The honest
+reading is that **the gate learned a low response at those addresses**, which is a training-signal
+problem, not an architecture gap. The fix is a loss/objective change in stage 1, not a code change.
 
 ### The parts worth taking
 
@@ -140,15 +165,10 @@ all 8 heads with offsets that are exact multiples of it — which is *why* all f
 one address (see `ENGRAM_ANATOMY.md`). Using distinct primes decorrelates the heads for free, at
 inference cost only. This is the structural fix for the rank-1 addressing defect.
 
-**3. Signed-sqrt gate.** `Engram` gates the write by a normalized dot product of the residual stream
-against a key, then `sigmoid(copysign(|dot|.sqrt, dot))`. A gate is exactly what Whittle lacks: its head 3
-is *trained* quiet with no adaptive mechanism, so it cannot recover. V4.1's gate lets a quiet head wake up
-per-token. This is the most valuable single idea to steal, and it is ~15 lines.
-
-**4. Two injection sites.** Whittle has one (`ple_layer_ids: [2]`). A second site deepens the engram's
+**3. Two injection sites.** Whittle has one (`ple_layer_ids: [2]`). A second site deepens the engram's
 influence, but it doubles table size and is a retrain, not a patch.
 
-**5. fp8 with 32-wide blocks.** `ParallelEngramEmbedding` stores the table as `float8_e4m3fn` with a
+**4. fp8 with 32-wide blocks.** `ParallelEngramEmbedding` stores the table as `float8_e4m3fn` with a
 per-32-dim scale, dequantizing on lookup — 1 byte/value plus a 2-byte scale per 32, against Whittle's
 Q8_0 272 B/row for 256 dims. Comparable density, but fp8 has a wider dynamic range than int8 and no
 per-block zero point, which suits weights that span several orders of magnitude. We already know IQ4_NL
@@ -164,25 +184,51 @@ beats Q4_0 here for exactly that reason.
   `engram_compressed_vocab_size` via a per-layer RNG seeded `10007 * layer_id`. Whittle's are already
   baked into trained weights; adopting V4.1's re-addresses all 39M rows.
 
-### So: yes, rip three things, and one of them is nearly free
+### So: rip two things, and neither is the gate
 
-Ordered by value per unit of work:
+Because the gate already exists, the only real gains are structural, and both need a retrain:
 
-1. **Signed-sqrt gate on the engram write** — ~15 lines, no retrain of the hash, testable in stage 1.
-   Directly fixes "head 3 cannot recover" because it adds the adaptive mechanism head 3 lacks.
-2. **Prime bucket moduli, disjoint per head** — removes the rank-1 addressing defect. Needs a retrain
+1. **Prime bucket moduli, disjoint per head** — removes the rank-1 addressing defect. Needs a retrain
    (it re-addresses rows) but no architecture change.
-3. **Compressed vocab** — free to adopt, 1.30× smaller space, but measured 2.1–4.0% real effect. Do it
-   alongside 2, not on its own.
+2. **Compressed vocab** — cheaper with (1) than alone: 1.30× smaller space, but a measured 2.1–4.0%
+   real-text effect. Do it in the same run.
 
-### A capacity caveat that changes the ceiling
+Existing behaviour does **not** need the V4.1 gate. Head 3's silence is a training-signal problem, so the
+attempt to fix it belongs in the loss (stage 1: force head 3's rows to carry predictive signal at the
+addresses they share with heads 0–2), not in new architecture.
+
+### Verification note: the trained weights use EQUAL head sizes, not distinct primes
+
+The published `transformers` reference builds `head_vocab_sizes` as eight **distinct primes**
+(`_find_nth_prime_after(4_880_000 - 1, head+1)` → 4,880,011 … 4,880,111), which gives 39,040,548 rows,
+padded to 39,040,640. The GGUF says eight identical 4,880,000s — 39,040,000 rows. These disagree, so it
+was settled against the trained bytes (`read_base_buffers.py`, reading the base checkpoint's own buffers
+over HTTP range):
+
+```
+model.ple_embedding.ngram_heads_vocab_sizes  I64 [8]
+    values [4880000] x 8      distinct? False     sum 39,040,000
+model.ple_embedding.ngram_heads_offsets      I64 [8]
+    values [0, 4880000, 9760000, ..., 34160000]
+model.ngram_embedding.shard_{0..4}.weight    total rows 39,040,000
+```
+
+**The trained checkpoint uses equal sizes and therefore a single shared modulus.** So the published
+reference does not reproduce these weights, and the shared-address finding in `ENGRAM_ANATOMY.md` stands.
+Anyone fine-tuning from `modeling_qwen4_exp.py` unmodified would hash into a differently laid-out table —
+which is a live trap for exactly the retrain we are planning.
+
+Also note `config.json` says `ple_layer_ids: [2]` (1-indexed) while the GGUF says `ple.layers: [1]`
+(0-indexed) — the same single site, layer 2 in human terms.
+
+## A capacity caveat that changes the ceiling
 
 Measured live density, corrected for the within-order address sharing:
 
 | | live rows/head | rows per live value |
 |---|---|---|
 | Whittle | 0.68 of 4.88M | 39.04M / 18.1M live values = **2.16** |
-| V4.1 | 1.0 (not measurable from here) | **8.27** × 2 layers |
+| V4.1 | not measurable without downloading 197 GB | **8.27** × 2 layers |
 
 Whittle allocates ~2.2 live table values per body parameter; V4.1 ~8.3 per layer. Whittle's table is
 therefore *relatively* 3.8× smaller than its body needs, which is a plausible reason the head 3 / head 7
